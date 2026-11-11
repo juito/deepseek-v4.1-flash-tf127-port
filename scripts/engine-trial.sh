@@ -8,7 +8,8 @@
 # TF_DSV41_SESSION_RESIDENT_GIB must match or both ranks refuse.
 # The process binds --host to this node's Tailscale IP, or 127.0.0.1. Never 0.0.0.0.
 # --context and TF_DSV41_CONTEXT come from CONTEXT (524288). PARALLEL is --parallel.
-# TF_DSV41_SLOTS is a different knob and is left at the engine default.
+# TF_DSV41_SLOTS is the engine's live slot count (default 1). It must equal PARALLEL.
+# The family Options struct has no lanes field, so --parallel alone does not raise it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck disable=SC1091
@@ -58,6 +59,22 @@ if [[ "${TF_DSV41_PREFILL:-}" == replay && -z "${TF_DSV41_SESSION_RESIDENT_GIB:-
   echo "engine-trial: replay with TF_DSV41_SESSION_RESIDENT_GIB unset is unlimited. Set 3, or 2 under a 4 GiB trough." >&2
   exit 1
 fi
+if [[ "${TF_DSV41_SLOTS:-}" != "$PARALLEL" ]]; then
+  echo "engine-trial: TF_DSV41_SLOTS=${TF_DSV41_SLOTS:-unset} must equal PARALLEL=$PARALLEL. The engine default is 1 slot, so four HTTP agents would run one at a time." >&2
+  exit 1
+fi
+if [[ "${TF_DSV41_POOL_TOKENS:-}" != 1048576 ]]; then
+  echo "engine-trial: TF_DSV41_POOL_TOKENS must be 1048576 (the live 1M pool). Four slots need that pool. 2097152 spends SparkOne's page cache." >&2
+  exit 1
+fi
+if [[ "${TF_DSV41_SLOT_DRAFTS:-}" != 1 ]]; then
+  echo "engine-trial: TF_DSV41_SLOT_DRAFTS=1 keeps DSpark on all $PARALLEL slots." >&2
+  exit 1
+fi
+if [[ "${TF_DSV41_SESSION_SLOTS:-}" != 1 ]]; then
+  echo "engine-trial: TF_DSV41_SESSION_SLOTS=1 or the session store turns off when TF_DSV41_SLOTS is above 1." >&2
+  exit 1
+fi
 
 hash="$(scripts/port-hash.sh)"
 IMAGE="${TRIAL_IMAGE_PREFIX}${hash}"
@@ -67,7 +84,7 @@ trial_assert_identity
 
 if [[ "$GUARD_ONLY" == 1 || "${DRY_RUN:-0}" == 1 ]]; then
   echo "engine-trial: container=$CONTAINER_NAME image=$IMAGE port=$PORT host=$HOST"
-  echo "engine-trial: TF_DSV41_PREFILL=${TF_DSV41_PREFILL:-full} TF_DSV41_SESSION_RESIDENT_GIB=${TF_DSV41_SESSION_RESIDENT_GIB:-unset} TF_DSV41_CONTEXT=$TF_DSV41_CONTEXT"
+  echo "engine-trial: TF_DSV41_PREFILL=${TF_DSV41_PREFILL:-full} TF_DSV41_SLOTS=${TF_DSV41_SLOTS:-unset} TF_DSV41_SESSION_RESIDENT_GIB=${TF_DSV41_SESSION_RESIDENT_GIB:-unset} TF_DSV41_CONTEXT=$TF_DSV41_CONTEXT"
   echo "engine-trial: live image $LIVE_IMAGE and container $LIVE_CONTAINER are not targets"
   echo "trial-guard: ok"
   exit 0

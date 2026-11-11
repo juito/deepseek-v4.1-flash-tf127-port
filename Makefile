@@ -10,7 +10,7 @@ help:
 	@echo "make check                 validate profiles, syntax, shell scripts (CI runs this)"
 	@echo "make triage                re-run the 53-patch triage against TF_TAG (default v1.2.7)"
 	@echo "make profile NAME=ttft-fill write scripts/local.sh from profiles/<name>.env"
-	@echo "make plan FREE=6.97        Nov 11 SparkOne MemAvailable; do not spend it on POOL"
+	@echo "make plan FREE=6.97        Nov 11 SparkOne MemAvailable; the trial pool stays at 1M"
 	@echo "make ttft OUT=runs/a.json  TTFT on the trial (port 8890; refuses 8888/18004)"
 	@echo "make bench OUT=runs/b.json prefill+decode on the trial (same refusal)"
 	@echo "scripts/trial.sh restart   start the trial container, not the live serve"
@@ -34,7 +34,7 @@ check:
 	@bash -n scripts/build-image.sh && echo "bash OK: scripts/build-image.sh"
 	@bash -n scripts/port-hash.sh && echo "bash OK: scripts/port-hash.sh"
 	@scripts/gate.sh --self-check
-	@python3 -m py_compile tools/endpoint_guard.py tools/bench.py && echo "python OK: tools/endpoint_guard.py tools/bench.py"
+	@python3 -m py_compile tools/endpoint_guard.py tools/bench.py scripts/gate_concurrency.py && echo "python OK: tools/endpoint_guard.py tools/bench.py scripts/gate_concurrency.py"
 	@scripts/check-profiles.sh
 	@python3 -I scripts/test_trial_guards.py
 

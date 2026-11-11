@@ -59,7 +59,11 @@ The live prompt cache was full: 512 MiB, 121 evictions, 95.2% prefix hit rate, a
 local NVMe, disk budget 64 GiB, `TF_DSV41_SESSION_RESIDENT_GIB=3` on **both** ranks. Unset
 is unlimited. A mismatch refuses both ranks. If the trough goes under 4 GiB, switch to
 `tf127-replay-2gib`. `tf127-baseline` is the fair live match: `PARALLEL=4`, prefill `full`,
-resident 0.5 GiB. `tf127-pf4k` (+0.66 GiB) and `tf127-prefetch` stay off until token equality
+resident 0.5 GiB. Every v1.2.7 profile also sets `TF_DSV41_SLOTS=4`,
+`TF_DSV41_POOL_TOKENS=1048576`, `TF_DSV41_SLOT_DRAFTS=1`, and `TF_DSV41_SESSION_SLOTS=1`.
+`--parallel` does not set the engine's slots (default 1), and without the 1M pool those
+slots and the session store do not come up. Do not raise the pool to 2,097,152.
+`tf127-pf4k` (+0.66 GiB) and `tf127-prefetch` stay off until token equality
 against replay passes. Weights stay EAQ v1 `45ee5d0f` (KL 0.0137, top-1 96.6%). v1.2.7 has
 no mixed-pack loader.
 
@@ -76,10 +80,12 @@ scripts/engine-trial.sh --stop-live --profile profiles/tf127-replay.env restart
 # on SparkTwo, same profile, RANK_OVERRIDE=1, same resident cap
 ```
 
-`scripts/gate.sh` aborts if `MemAvailable` is under 3.5 GiB on either node. Live cold refs
-it compares against: 8k **13.80 s**, 131k **57.89 s**. 4-stream decode that day was
-**102.7 tok/s** (pass floor 95% of that). It also records 32k, warm TTFT, a restart then
-the same 8k prompt, a short request during a long prefill, and `exact.py` 31/31.
+`scripts/gate.sh` aborts if `MemAvailable` is under 3.5 GiB on either node, or if
+`tensorfold:lanes` is not 4. Live cold refs it compares against: 8k **13.80 s**, 131k
+**57.89 s**. Four agents that day decoded at **102.7 tok/s** aggregate (pass floor 95% of
+that, and the aggregate has to be above the fastest of the four, so a serial queue does
+not pass). It also records 32k, warm TTFT, a restart then the same 8k prompt, a short
+request during a long prefill, and `exact.py` 31/31.
 
 ```bash
 scripts/gate.sh --url http://100.78.243.41:8890 \
@@ -196,7 +202,7 @@ for that pass), then the trial, then the old image again.
    ```
 
    The recipe's 128k cold row is **63.28 s**. The Nov 11 live cold refs the gate uses are
-   **13.80 s at 8k** and **57.89 s at 131k**. 4-stream decode that day was **102.7 tok/s**.
+   **13.80 s at 8k** and **57.89 s at 131k**. Four agents that day decoded at **102.7 tok/s** aggregate.
    Warm resume of a kept prefix in the recipe is **1.5–1.9 s** (159k and 261k histories).
    A spill resume of a 237k conversation was **1.7 s** against **118 s** recomputed.
    `scripts/gate.sh` is the bundled form of this list, including restart-then-restore and

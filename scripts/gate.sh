@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # On-hardware gate for the v1.2.7 trial. Run it on SparkOne against port 8890.
 #
-# Pass only when correctness matches the live exact.py record and the Nov 11
-# cold TTFT refs improve, with 4-stream decode no more than 5% below 102.7 tok/s.
-# Aborts before any prompt if MemAvailable is under 3.5 GiB on either node.
+# Pass only when correctness matches the live exact.py record, the Nov 11
+# cold TTFT refs improve, four agents all finish, their decode overlaps, and
+# the aggregate is no more than 5% below 102.7 tok/s.
+# Aborts before any prompt if MemAvailable is under 3.5 GiB on either node,
+# or if the engine advertises fewer than 4 lanes.
 #
 #   scripts/gate.sh --self-check
 #   scripts/gate.sh --url http://100.78.243.41:8890 --exact-old runs/exact-old.json
@@ -118,6 +120,16 @@ else
   exit 3
 fi
 
+# tensorfold:lanes is the engine's live slots (LaneHost.lanes = TF_DSV41_SLOTS).
+# --parallel 4 with SLOTS left at 1 still prints 1 here, and four HTTP agents queue.
+echo "gate: requiring tensorfold:lanes == 4"
+LANES="$(curl -fsS --max-time 5 "${URL%/}/metrics" | awk '/^tensorfold:lanes / {print $2; exit}')"
+if [[ "$LANES" != 4 ]]; then
+  echo "gate: tensorfold:lanes is ${LANES:-missing}. Four agents need TF_DSV41_SLOTS=4 on both ranks. Aborting." >&2
+  exit 4
+fi
+echo "gate: engine lanes $LANES"
+
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 WORKDIR="runs/gate-${STAMP}"
 mkdir -p "$WORKDIR"
@@ -231,6 +243,8 @@ fi
 
 python3 -I - "$WORKDIR" "$OUT" "$LOCAL_KIB" "$PEER_KIB" "$EXACT_OLD" "$TOKEN_BASELINE" "$PROFILE" <<'PY'
 import json, pathlib, sys
+sys.path.insert(0, "scripts")
+import gate_concurrency
 work, out, local_kib, peer_kib, exact_old, token_base, profile = sys.argv[1:]
 root = pathlib.Path(work)
 reasons = []
@@ -257,9 +271,11 @@ for label, warm, cold in (("8k", warm8, cold8), ("32k", warm32, cold32), ("131k"
     if warm is None or cold is None or not (warm < cold):
         reasons.append(f"{label} warm TTFT {warm} is not below cold {cold}")
 multi = load("multi.json", {})
-decode = (multi.get("summary") or {}).get("multi.4.aggregate_tok_s")
-if decode is None or decode < refs["decode_4stream_tok_s"] * 0.95:
-    reasons.append(f"4-stream decode {decode} tok/s is more than 5% under {refs['decode_4stream_tok_s']}")
+four = [r for r in (multi.get("runs") or []) if r.get("suite") == "multi" and r.get("streams") == 4]
+row = four[-1] if four else None
+reasons.extend(gate_concurrency.reasons(row, refs["decode_4stream_tok_s"]))
+agents = gate_concurrency.stats(row)
+decode = agents["aggregate_tok_s"]
 exact_status = (root / "exact-status").read_text().strip() if (root / "exact-status").exists() else "missing"
 exact_ok = exact_status == "ok"
 if exact_status == "missing":
@@ -307,6 +323,7 @@ doc = {
     "restore_8k_s": restore_s,
     "cut_in_short_s": cut.get("short_s"),
     "decode_4stream_tok_s": decode,
+    "agents": agents,
     "exact_match": exact_ok,
     "token_sha256": sha.get("token_sha256"),
     "prompt_cache_live": {

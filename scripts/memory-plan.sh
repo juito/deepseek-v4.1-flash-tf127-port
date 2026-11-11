@@ -9,7 +9,8 @@
 # Nov 11 ~2 PM PST, live Sparks: SparkOne MemAvailable 6.96-6.98 GiB, of which
 # 1.23 GiB is truly free (the rest is Engram page cache and margin). Headroom
 # is about 2-3 GiB. SparkTwo MemAvailable 8.59 GiB. Do not spend that on a
-# larger POOL or on more bits. The v1.2.7 trial caps TF_DSV41_SESSION_RESIDENT_GIB
+# pool above the live 1,048,576 positions, or on more bits. Four engine slots
+# need that 1M pool. The v1.2.7 trial caps TF_DSV41_SESSION_RESIDENT_GIB
 # at 3 (fallback 2) and leaves the 12.2 GiB engine reserve alone.
 # The table below is the old pool math. It treats the number you pass as
 # spendable. MemAvailable on Nov 11 was not spendable.
@@ -41,10 +42,12 @@ BEGIN {
     printf "%-12d %-12.2f %-12.2f %-12.2f %s\n", p, u, s, head, verdict
   }
   printf "\n"
-  printf "trial budget: leave POOL unset. Cap TF_DSV41_SESSION_RESIDENT_GIB at 3 on both ranks (2 if the MemAvailable trough is under 4 GiB).\n"
+  printf "trial budget: POOL=1048576 and TF_DSV41_SLOTS=4. Cap TF_DSV41_SESSION_RESIDENT_GIB at 3 on both ranks (2 if the MemAvailable trough is under 4 GiB).\n"
+  printf "  The 1M pool is what the live serve already uses, so it is already inside the Nov 11 MemAvailable reading.\n"
+  printf "  Four engine slots and the session store need it. Do not raise it to 2097152.\n"
   printf "  SparkOne headroom is about 2-3 GiB. Truly free on Nov 11 was 1.23 GiB; the rest of MemAvailable is Engram page cache.\n"
   printf "  Memguard still kills at 2.5 GiB for 4 s (hard 1 GiB). Do not lower TENSORFOLD_MEMORY_RESERVE_GIB below 12.2.\n"
   if (best > 0) {
-    printf "old pool math would have said POOL=%d (%.2f GiB). That spends the page cache. The v1.2.7 profiles do not set it.\n", best, best / 1048576 * 1.0
+    printf "old pool math would have said POOL=%d (%.2f GiB). That spends the page cache. The v1.2.7 profiles stay at 1048576.\n", best, best / 1048576 * 1.0
   }
 }'
