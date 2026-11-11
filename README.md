@@ -39,6 +39,7 @@ python3 -I recipe-tf-fbbc971/tools/exact.py  # replies must not move
 | `balanced.env` | Day-to-day at the full window | Full window, spill on, interleave 250, `GRAPH_CAP=128` |
 | `long-context.env` | 1M-token work | `POOL=2097152`, `KV_SHARD=1` (context, not TTFT) |
 | `residency.env` | Spend the RAM left after the weights | `POOL=2097152`, `KV_SHARD=0` — more kept conversations, full decode speed |
+| `factual.env` | Factual answers, agent loops | `TEMPERATURE=0`, `THINKING_BUDGET=4096`, `DROP_REASONING_HISTORY=1` |
 
 Each profile must be measured, not trusted. `scripts/check-profiles.sh` rejects unknown keys
 (a typo would otherwise be silently ignored by the launcher), off-grid `CONTEXT`/`POOL`, and
@@ -93,6 +94,7 @@ filenames) and **0 of 18** recipe switches survive. `make triage` reproduces the
 docs/first-token.md      TTFT playbook: ranked levers, mechanism, cost, measurement protocol
 docs/quantization.md     2.9 bpw invariant, EAQ v1 vs v1.1, what must re-baseline
 docs/spare-memory.md     what the RAM left after the weights can and cannot buy
+docs/accuracy.md         hallucination: deployment bugs, sampling, quantization, and the client
 docs/port-status.md      v1.2.7 triage, why 52/53 are blocked, validation gate
 profiles/*.env           layered presets, validated against config.sh/port.sh
 tools/ttft.py            TTFT-only bench: cold/warm, p50/p90, --compare
