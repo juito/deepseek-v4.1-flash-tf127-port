@@ -30,7 +30,9 @@ same image can serve both.
 
 v1.1 is labelled experimental in the recipe and is a *precision* change, not a speed change. If you
 want "2.9 or greater" in the sense of more precision, v1.1 is the only sanctioned option — but it
-costs you the reply baseline and it is not a TTFT lever.
+costs you the reply baseline and it is not a TTFT lever. How long the prepared folder takes to
+rebuild for that pack swap is **unmeasured**. TensorFold 1.2.6 `#2325` (~10.5 min, then ~5 min)
+is a prepared-folder rebuild on an engine upgrade, not this swap.
 
 ## What a speed change must prove
 

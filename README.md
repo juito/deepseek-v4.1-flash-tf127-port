@@ -23,30 +23,41 @@ Read [`docs/first-token.md`](docs/first-token.md). The short version:
   prompt row width, and the indexer split.
 
 ```bash
-make check                                   # validate profiles + syntax (CI runs this)
-make profile NAME=ttft                       # write scripts/local.sh from profiles/ttft.env
-./start.sh restart
-make ttft OUT=runs/ttft-after.json           # p50/p90 TTFT, cold and warm
+make check                                   # validate profiles, guards, syntax (CI runs this)
+make profile NAME=ttft-fill                 # write the trial local.sh (not the live serve)
+scripts/trial.sh --stop-live restart        # separate container, image tag, and port 8890
+source scripts/trial-env.sh                 # API_URL for the trial; refuses 8888 and 18004
+make ttft OUT=runs/ttft-after.json          # p50/p90 TTFT, cold and warm
 make compare A=runs/ttft-before.json B=runs/ttft-after.json
-python3 -I recipe-tf-fbbc971/tools/exact.py  # replies must not move
 ```
+
+There is no `start.sh` at the repository root. The trial path is [`docs/trial-runbook.md`](docs/trial-runbook.md).
+It does not replace the live container `dsv41-1017-exl3-tf`, the live tag
+`tensorfold-dsv41:exl3-tp2-8a98ae503d85`, or port 8888.
 
 ## Profiles
 
 | Profile | For | Notable settings |
 |---|---|---|
-| `ttft.env` | Interactive chat, 512K window | `MAX_TOKENS=8192`, `TF_DS_PROMPT_WINDOW_ROWS=128`, `TF_FILL_CHUNKS=1` + `TF_FILL_CUT_IN=8192`, `SPILL_GIB=64`, `GRAPH_CAP=128` |
-| `balanced.env` | Day-to-day at the full window | Full window, spill on, interleave 250, `GRAPH_CAP=128` |
-| `long-context.env` | 1M-token work | `POOL=2097152`, `KV_SHARD=1` (context, not TTFT) |
-| `residency.env` | Spend the RAM left after the weights | `POOL=2097152`, `KV_SHARD=0` — more kept conversations, full decode speed |
+| `ttft-fill.env` | Interactive chat, cut-in | `MAX_TOKENS=8192`, `TF_FILL_CHUNKS=1`, `TF_FILL_CUT_IN=8192`, `PREFILL_INTERLEAVE_MS=0` |
+| `ttft-interleave.env` | Interactive chat, interleave | `PREFILL_INTERLEAVE_MS=250`, no `TF_FILL_*` (the two are mutually exclusive) |
+| `balanced.env` | Day-to-day | `CONTEXT=524288`, spill on, interleave 250, `GRAPH_CAP=128` |
+| `long-context.env` | More resident history | `CONTEXT=524288`, `POOL=2097152`, `KV_SHARD=1` |
+| `residency.env` | Kept conversations, full decode | `CONTEXT=524288`, `POOL=2097152`, `KV_SHARD=0` |
+
+`CONTEXT` is capped at **524288** in every profile. That is the live window. A run at
+655,360 killed a 464K-token turn. `TF_FILL_CHUNKS` turns the 0005 interleave off, so the
+two TTFT profiles are an A/B pair, not one file that sets both.
 
 Each profile must be measured, not trusted. `scripts/check-profiles.sh` rejects unknown keys
-(a typo would otherwise be silently ignored by the launcher), off-grid `CONTEXT`/`POOL`, and
-`POOL < CONTEXT`.
+(a typo would otherwise be silently ignored by the launcher), off-grid `CONTEXT`/`POOL`,
+`POOL < CONTEXT`, `CONTEXT` above 524288, and `TF_FILL_CHUNKS` combined with a non-zero interleave.
 
 ## The RAM left over after the weights
 
-Read [`docs/spare-memory.md`](docs/spare-memory.md). With ~9 GiB free a Spark:
+Read [`docs/spare-memory.md`](docs/spare-memory.md). **9 GiB free is an assumption, not a
+measurement.** The recipe records about **6.2–6.5 GiB `MemAvailable` after the load**. With
+whatever you actually have free:
 
 - **It cannot buy bits.** EXL3 2.9 bpw is fixed in the checkpoint; no runtime path upcasts trellis
   tensors into spare RAM. The only precision path is the EAQ v1.1 pack (27 indexer/compressor
@@ -56,13 +67,14 @@ Read [`docs/spare-memory.md`](docs/spare-memory.md). With ~9 GiB free a Spark:
   More pool keeps more conversations resident, so follow-ups resume instead of re-prefilling.
 
 ```bash
-make plan FREE=9        # budget table + recommendation
+make plan FREE=6.5      # budget from a measured MemAvailable; FREE=9 is unmeasured
 make profile NAME=residency
 ```
 
-For 9 GiB the recommendation is `POOL=2097152` with `KV_SHARD=0`: the documented four-concurrent-
-500K case, ~2 GiB a rank, ~7 GiB headroom, and no sharding penalty. Leave the rest free — Engram
-reads use the page cache, and `GRAPH_CAP=128` is already the right bound.
+`scripts/memory-plan.sh` still recommends `POOL=2097152` with `KV_SHARD=0` at 6.5 GiB free
+(~2 GiB a rank). The ~7 GiB headroom in the old write-up assumed 9 GiB free, which this
+repository has not measured. Leave the rest free — Engram reads use the page cache, and
+`GRAPH_CAP=128` is already the right bound.
 
 ## Keeping 2.9 bpw
 
@@ -84,8 +96,13 @@ baseline. Every profile here is scheduling, so the baseline stays valid.
 | Upstream commits missing | **6,958** |
 | Recipe patches | **53**, of which **1** applies |
 
-The family was rewritten upstream (`dsv41`, 62 files → `deepseek_v41`, 243 files, zero shared
-filenames) and **0 of 18** recipe switches survive. `make triage` reproduces the count.
+The family was rewritten upstream. At v1.2.7 (`93a2e93ece`) `deepseek_v41` has **358** files
+against the fork's **62** under `dsv41`. **10 basenames are shared** (`model.zig`, `prompt.zig`,
+`engram.zig`, `lanes.zig`, `weights.zig`, and five others) and those files are rewritten; sharing
+a name is not a patch that applies. **0 of 18** fork switch names (`TF_DS_*`, `TF_FILL_*`,
+`TF_RDMA_*`) occur in the v1.2.7 tree; upstream's names are `TF_DSV41_*`. `make triage`
+reproduces the patch count. The old "28 family + 24 server" split double-counted four patches
+and dropped five. See [`docs/port-status.md`](docs/port-status.md).
 
 ## Layout
 
@@ -94,10 +111,13 @@ docs/first-token.md      TTFT playbook: ranked levers, mechanism, cost, measurem
 docs/quantization.md     2.9 bpw invariant, EAQ v1 vs v1.1, what must re-baseline
 docs/spare-memory.md     what the RAM left after the weights can and cannot buy
 docs/port-status.md      v1.2.7 triage, why 52/53 are blocked, validation gate
+docs/trial-runbook.md    side image, stop-live, matched gate, rollback
 profiles/*.env           layered presets, validated against config.sh/port.sh
-tools/ttft.py            TTFT-only bench: cold/warm, p50/p90, --compare
-scripts/profile.sh       write profiles/<name>.env into scripts/local.sh
-scripts/check-profiles.sh validate keys, grid alignment, POOL >= CONTEXT
+tools/ttft.py            TTFT on port 8890; refuses 8888 and 18004
+tools/bench.py           same guard, then the recipe bench
+scripts/trial.sh         the only start path (distinct container, tag, port, host)
+scripts/profile.sh       write profiles/<name>.env into the recipe's local.sh
+scripts/check-profiles.sh validate keys, grid, CONTEXT <= 524288, fill vs interleave
 scripts/memory-plan.sh   KV-pool budget from the free GiB you actually see
 scripts/triage.sh        re-run the 53-patch triage against any tag
 recipe-tf-fbbc971/       the recipe verbatim at c7f2b85 (reference + runnable engine)

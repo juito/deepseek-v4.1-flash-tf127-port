@@ -54,17 +54,25 @@ p50/p90 for cold and warm prompts, plus a `--compare` table between two runs.
 
 ```bash
 # cold TTFT across the ladder, 5 reps, JSON out
+# default URL is http://127.0.0.1:8890; 8888 and 18004 are refused without --allow-live
+source scripts/trial-env.sh
 python3 -I tools/ttft.py --sizes 512,2048,8192,32768,131072 --reps 5 \
   --out runs/ttft-before.json --label before
 
-# apply a profile, restart, measure again
-scripts/profile.sh ttft
-./start.sh restart
+# apply one arm, restart the trial (not the live container), measure again
+scripts/profile.sh ttft-fill --force
+scripts/trial.sh --stop-live restart
+source scripts/trial-env.sh
 python3 -I tools/ttft.py --sizes 512,2048,8192,32768,131072 --reps 5 \
   --out runs/ttft-after.json --label after
 
 python3 -I tools/ttft.py --compare runs/ttft-before.json runs/ttft-after.json
 ```
+
+The server for that measurement is the trial on port 8890. `tools/ttft.py` reads
+`/metrics` and refuses to send a prompt while `requests_running` is not 0. There is no
+`./start.sh` at the repository root. The procedure, including rollback of
+`dsv41-1017-exl3-tf`, is [`trial-runbook.md`](trial-runbook.md).
 
 Rules for a trustworthy number:
 
@@ -80,14 +88,19 @@ Rules for a trustworthy number:
 
 ## Presets
 
-`profiles/` holds three layered presets. They are hypotheses with a measurement attached, not
-promises:
+`profiles/` holds layered presets. They are hypotheses with a measurement attached, not
+promises. `CONTEXT` is 524288 in all of them.
 
 | Profile | For | What it sets |
 |---|---|---|
-| `ttft.env` | Interactive chat, 512K window | Local Engram, `MAX_TOKENS=8192`, `PROMPT_WINDOW_ROWS=128`, fill chunks + cut-in, spill on, `GRAPH_CAP=128` |
-| `balanced.env` | Default day-to-day | Local Engram, full window, spill on, interleave 250, `GRAPH_CAP=128` |
-| `long-context.env` | 1M-token work, four streams | `POOL=2097152`, `KV_SHARD=1`, spill on, `GRAPH_CAP=128` |
+| `ttft-fill.env` | Cut-in A/B arm | Local Engram, `MAX_TOKENS=8192`, prompt rows 128, `TF_FILL_CHUNKS=1`, `PREFILL_INTERLEAVE_MS=0` |
+| `ttft-interleave.env` | Interleave A/B arm | The same scheduling with `PREFILL_INTERLEAVE_MS=250` and no `TF_FILL_*` |
+| `balanced.env` | Day-to-day | Local Engram, `CONTEXT=524288`, spill on, interleave 250, `GRAPH_CAP=128` |
+| `long-context.env` | More resident history | `POOL=2097152`, `KV_SHARD=1`, spill on, `GRAPH_CAP=128` |
+| `residency.env` | Kept conversations | `POOL=2097152`, `KV_SHARD=0` |
 
-Apply one with `scripts/profile.sh <name>`; it writes `scripts/local.sh`, which `config.sh` layers
-over the environment. Validate every key first with `scripts/check-profiles.sh`.
+`TF_FILL_CHUNKS` disables patch 0005, so one profile does not set both the fill knobs and a
+non-zero interleave. Apply one with `scripts/profile.sh <name>`; it writes
+`recipe-tf-fbbc971/scripts/local.sh` for the **trial** container, port, and host. `config.sh`
+layers that file over the environment. Validate every key first with `scripts/check-profiles.sh`.
+Start with `scripts/trial.sh`, not `./start.sh`.
