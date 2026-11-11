@@ -1,8 +1,15 @@
-# The 9 GiB left on each Spark: what it can and cannot buy
+# The RAM left on each Spark: what it can and cannot buy
 
-Short answer: **it cannot buy bits, and it cannot raise decode tok/s.** What it *can* buy is
-residency — more kept conversations staying in the pool — which lowers first-token latency on
-follow-ups and lets more long requests run at once.
+**9 GiB free is an assumption. It has not been measured by this repository.** The recipe's own
+numbers, on a headless head after the weights are loaded, are about **6.2–6.5 GiB
+`MemAvailable`** (`docs/memory-and-safety.md`: 6.2–6.3 GiB idle at `POOL=2097152`; the
+changelog's resume note: 6.5 GiB after the load, 4.9 GiB at 159K tokens, 4.2 GiB at 261K).
+`scripts/memory-plan.sh` with no argument still prints a table for 9 and says so on stderr.
+Pass the GiB you read.
+
+Short answer, at whatever that number is: **spare RAM cannot buy bits, and it cannot raise
+decode tok/s.** What it can buy is residency — more kept conversations staying in the pool —
+which lowers first-token latency on follow-ups and lets more long requests run at once.
 
 ## Why spare RAM cannot raise precision
 
@@ -28,15 +35,17 @@ EAQ v1.1 stores **27 indexer/compressor linears** as BF16 instead of trellis —
 8 `attn.indexer.wq_b`, 4 `attn.compressor.wkv`, 3 `attn.compressor.wgate`, 4 `attn.indexer.wk`. It
 prints `mixed pack: 27 float linears` at load. That is a **pack swap**, not spare-RAM spending:
 
-- It is a separate ~196 GiB download and a one-time prepared-folder rebuild (~10.5 min first boot
-  at TP=2 on two GB10s, ~5 min after — TensorFold 1.2.6, #2325).
+- It is a separate ~196 GiB download. How long a prepared-folder rebuild takes **for that pack
+  swap is unmeasured**. TensorFold 1.2.6 `#2325` is a different number: prepared folders rebuild
+  once on an engine upgrade (~10.5 min to weights loaded on the first boot at TP=2 on two GB10s,
+  ~5 min later). Do not quote `#2325` as the cost of changing EAQ packs.
 - It **changes the bits**, so the recorded `tools/exact.py` 31-case baseline is invalid until you
   record a new one.
 - It is labelled experimental, and `ABLIT=1` is refused with it.
 - It improves precision on those 27 small tensors only. It is not a global 3.5 bpw.
 
-If your goal is "more precision somewhere", this is the only sanctioned way to get it, and the
-spare 9 GiB is not what enables it — disk and a re-baseline are.
+If your goal is "more precision somewhere", this is the only sanctioned way to get it. Spare RAM
+is not what enables it — disk and a re-baseline are. The unmeasured 9 GiB figure does not either.
 
 ## What spare RAM is actually good for: the KV pool
 
@@ -56,15 +65,27 @@ More pool means:
 It does **not** make decode faster. Decode rate depends on rows per round, drafts and bandwidth, not
 on how much KV you keep.
 
-### The budget for 9 GiB free
+### The budget
 
-Reserve before spending:
+The table below is what `scripts/memory-plan.sh` prints. The "free" column is an input, not a
+measurement. Two inputs matter:
+
+| Free GiB you pass | Where it comes from | Spendable after 3.5 GiB reserve | `POOL=2097152` headroom |
+|---|---|---|---|
+| 6.5 | recipe `MemAvailable` after load, about 6.2–6.5 | 3.0 | ~4.5 GiB |
+| 9 | **unmeasured assumption** | 5.5 | ~7 GiB |
+
+Reserve before spending, same as the script (memguard 2.5 plus ~1.0 slack):
 
 | Item | GiB |
 |---|---|
 | `MEMGUARD_GIB` floor (a kill needs to stay under it for `MEMGUARD_HOLD_S`) | 2.5 |
 | Slack for the head's desktop and containers | ~1.0 |
-| **Spendable** | **~5.5** |
+| **Spendable if free were 9 (unmeasured)** | **~5.5** |
+| **Spendable at the recipe's ~6.5** | **~3.0** |
+
+The pool table's headroom column is `9 - replicated`. It is the unmeasured input. At 6.5 GiB
+free, subtract 2.5 from every headroom number.
 
 | `POOL` | Replicated | Sharded (`KV_SHARD=1`) | Headroom left | Note |
 |---|---|---|---|---|
@@ -74,16 +95,19 @@ Reserve before spending:
 | 6,291,456 | ~6.0 | ~3.3 | ~3.0 | tight; memguard territory |
 | 8,388,608 | ~8.0 | ~4.4 | ~1.0 | below the memguard floor — do not |
 
-**Recommendation: `POOL=2097152` with `KV_SHARD=0`.** It is the documented four-stream case, costs
-~2 GiB a rank, keeps ~7 GiB of headroom, and avoids KV sharding's 1–4% decode penalty entirely —
-with 9 GiB spare you do not need the memory sharding buys.
+**Recommendation: `POOL=2097152` with `KV_SHARD=0`.** It is the documented four-stream case and
+costs ~2 GiB a rank. At the recipe's ~6.5 GiB after load that leaves about 4.5 GiB of headroom,
+not the ~7 GiB you get only if 9 GiB free is real. It still avoids KV sharding's 1–4% decode
+penalty. Do not turn sharding on to "spend" an unmeasured 9 GiB.
 
-Go to `POOL=4194304` only if you routinely hold more than four long conversations. Beyond ~4M the
-typical working set is already resident, and every extra GiB is headroom you gave away.
+Go to `POOL=4194304` only if you routinely hold more than four long conversations **and** the
+GiB you measured still clears the reserve. At 6.5 GiB free that pool is already over the
+script's budget. Beyond ~4M the typical working set is already resident, and every extra GiB
+is headroom you gave away.
 
-Use `scripts/memory-plan.sh 9` to re-run this table for whatever you actually see free.
+Use `scripts/memory-plan.sh <GiB>` with the number you read off the Spark.
 
-## The rest of the 9 GiB: leave it alone
+## The rest of the free RAM: leave it alone
 
 - **Engram page cache.** Free RAM is not wasted: Engram reads go through the page cache, and the
   recipe records prefill at ~690–890 tok/s over NFS against ~2.1K locally. The kernel uses free RAM

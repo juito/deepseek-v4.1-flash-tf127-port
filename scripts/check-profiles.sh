@@ -35,6 +35,36 @@ for f in profiles/*.env; do
     esac
 
     case "$key" in
+      HOST)
+        case "$val" in
+          0.0.0.0|::|"[::]"|"*")
+            echo "FAIL $f: HOST=$val is refused (never 0.0.0.0)" >&2
+            bad=1
+            ;;
+        esac
+        ;;
+      PORT)
+        case "$val" in
+          8888|18004)
+            echo "FAIL $f: PORT=$val is the live serve or the Mac tunnel" >&2
+            bad=1
+            ;;
+        esac
+        ;;
+      CONTAINER_NAME)
+        if [ "$val" = "dsv41-1017-exl3-tf" ]; then
+          echo "FAIL $f: CONTAINER_NAME is the live serve" >&2
+          bad=1
+        fi
+        ;;
+      IMAGE)
+        case "$val" in
+          *exl3-tp2-8a98ae503d85*)
+            echo "FAIL $f: IMAGE would retag the live image" >&2
+            bad=1
+            ;;
+        esac
+        ;;
       CONTEXT|POOL)
         if [ -n "$val" ]; then
           if ! [[ "$val" =~ ^[0-9]+$ ]]; then
@@ -57,11 +87,27 @@ for f in profiles/*.env; do
     esac
   done < "$f"
 
-  # POOL may not be smaller than CONTEXT
+  # POOL may not be smaller than CONTEXT. CONTEXT is capped at the live
+  # window: 524288. A reported run at 655360 killed a 464K-token turn.
   ctx="$(grep -E '^CONTEXT=' "$f" | head -1 | cut -d= -f2 | sed 's/#.*//' | tr -d '[:space:]')"
   pool="$(grep -E '^POOL=' "$f" | head -1 | cut -d= -f2 | sed 's/#.*//' | tr -d '[:space:]')"
+  if [ -z "$ctx" ]; then
+    echo "FAIL $f: CONTEXT is unset (the recipe default is 1048576, above the 524288 cap)" >&2
+    bad=1
+  elif (( ctx > 524288 )); then
+    echo "FAIL $f: CONTEXT=$ctx exceeds 524288 (live serve; 655360 killed a 464K-token turn)" >&2
+    bad=1
+  fi
   if [ -n "$pool" ] && [ -n "$ctx" ] && (( pool < ctx )); then
     echo "FAIL $f: POOL=$pool is smaller than CONTEXT=$ctx" >&2; bad=1
+  fi
+
+  # TF_FILL_CHUNKS turns the 0005 interleave off. A profile must not set both.
+  fill="$(grep -E '^TF_FILL_CHUNKS=' "$f" | head -1 | cut -d= -f2 | sed 's/#.*//' | tr -d '[:space:]')"
+  inter="$(grep -E '^PREFILL_INTERLEAVE_MS=' "$f" | head -1 | cut -d= -f2 | sed 's/#.*//' | tr -d '[:space:]')"
+  if [ -n "$fill" ] && [ "$fill" != 0 ] && [ "$inter" != 0 ]; then
+    echo "FAIL $f: TF_FILL_CHUNKS=$fill and PREFILL_INTERLEAVE_MS=${inter:-<unset, recipe default 250>} are mutually exclusive. Use ttft-fill (chunks, interleave 0) or ttft-interleave (interleave 250, no TF_FILL_CHUNKS)." >&2
+    bad=1
   fi
 done
 

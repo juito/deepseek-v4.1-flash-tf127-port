@@ -5,10 +5,16 @@
 # KV_SHARD=1 (measured at 2,101,248 positions: 1,783 MiB against 1,062 MiB).
 # Reserve: MEMGUARD_GIB (2.5) plus ~1.0 GiB slack for the head's other work.
 #
-# Usage: scripts/memory-plan.sh [FREE_GIB]     # default 9
+# Usage: scripts/memory-plan.sh [FREE_GIB]
+# The default 9 is an unmeasured assumption. The recipe records about
+# 6.2-6.5 GiB MemAvailable after the weights load (docs/memory-and-safety.md,
+# CHANGELOG). Pass the number you actually read.
 set -uo pipefail
 
 free="${1:-9}"
+if [ "$#" -eq 0 ]; then
+  echo "note: 9 GiB is an unmeasured assumption. The recipe records ~6.2-6.5 GiB MemAvailable after load. Pass the number you measure." >&2
+fi
 reserve=3.5
 
 awk -v free="$free" -v reserve="$reserve" '

@@ -9,10 +9,11 @@ RECIPE := recipe-tf-fbbc971
 help:
 	@echo "make check                 validate profiles, syntax, shell scripts (CI runs this)"
 	@echo "make triage                re-run the 53-patch triage against TF_TAG (default v1.2.7)"
-	@echo "make profile NAME=ttft     write scripts/local.sh from profiles/<name>.env"
-	@echo "make plan FREE=9           spend the RAM left after the weights (KV pool budget)"
-	@echo "make ttft OUT=runs/a.json  measure first token on a running server"
-	@echo "make bench OUT=runs/b.json prefill+decode bench on a running server"
+	@echo "make profile NAME=ttft-fill write scripts/local.sh from profiles/<name>.env"
+	@echo "make plan FREE=6.5         KV pool budget; 9 is an unmeasured assumption"
+	@echo "make ttft OUT=runs/a.json  TTFT on the trial (port 8890; refuses 8888/18004)"
+	@echo "make bench OUT=runs/b.json prefill+decode on the trial (same refusal)"
+	@echo "scripts/trial.sh restart   start the trial container, not the live serve"
 	@echo "make compare A=runs/a.json B=runs/b.json"
 	@echo ""
 	@echo "profiles: $(shell ls profiles/*.env 2>/dev/null | xargs -n1 basename | sed 's/\.env//' | tr '\n' ' ')"
@@ -23,7 +24,12 @@ check:
 	@bash -n scripts/profile.sh && echo "bash OK: scripts/profile.sh"
 	@bash -n scripts/check-profiles.sh && echo "bash OK: scripts/check-profiles.sh"
 	@bash -n scripts/memory-plan.sh && echo "bash OK: scripts/memory-plan.sh"
+	@bash -n scripts/trial-guard.sh && echo "bash OK: scripts/trial-guard.sh"
+	@bash -n scripts/trial.sh && echo "bash OK: scripts/trial.sh"
+	@bash -n scripts/trial-env.sh && echo "bash OK: scripts/trial-env.sh"
+	@python3 -m py_compile tools/endpoint_guard.py tools/bench.py && echo "python OK: tools/endpoint_guard.py tools/bench.py"
 	@scripts/check-profiles.sh
+	@python3 -I scripts/test_trial_guards.py
 
 profiles:
 	@scripts/check-profiles.sh
@@ -37,14 +43,14 @@ ttft:
 
 bench:
 	@test -n "$(OUT)" || { echo "usage: make bench OUT=runs/b.json"; exit 2; }
-	python3 -I $(RECIPE)/tools/bench.py --suite prefill,decode --out $(OUT)
+	python3 -I tools/bench.py --suite prefill,decode --out $(OUT)
 
 compare:
 	@test -n "$(A)" -a -n "$(B)" || { echo "usage: make compare A=runs/a.json B=runs/b.json"; exit 2; }
 	python3 -I tools/ttft.py --compare $(A) $(B)
 
 profile:
-	@test -n "$(NAME)" || { echo "usage: make profile NAME=ttft"; exit 2; }
+	@test -n "$(NAME)" || { echo "usage: make profile NAME=ttft-fill"; exit 2; }
 	@scripts/profile.sh $(NAME) $(FORCE)
 
 plan:

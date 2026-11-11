@@ -6,8 +6,11 @@ token (p50/p90), plus the prefill rate implied by the counted prompt tokens.
 Cold prompts are built fresh per repetition so the prefix cache cannot answer;
 warm prompts reuse one salt so the second and later reps resume a kept state.
 
-Stdlib only. Endpoint: --url, else API_URL, else PORT, else scripts/local.sh,
-else 8888. Model: --model, else MODEL, else the recipe's served name.
+Stdlib only. Endpoint: --url, else API_URL, else PORT, else
+http://127.0.0.1:8890 (the trial). Ports 8888 and 18004 are refused unless
+--allow-live is set. /metrics must report requests_running == 0 before any
+request. --compare only reads saved JSON. Model: --model, else MODEL, else
+the recipe's served name.
 
 Examples:
   python3 -I tools/ttft.py --sizes 512,2048,8192,32768,131072 --reps 5 --out runs/a.json
@@ -20,11 +23,13 @@ import argparse
 import json
 import os
 import random
-import re
 import sys
 import time
 import urllib.error
 import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from endpoint_guard import assert_idle, assert_trial_url, default_base  # noqa: E402
 
 DEFAULT_MODEL = "DeepSeek-V4.1-Flash-1017"
 
@@ -46,28 +51,6 @@ WORDS = (
     "health person art war history party result change morning reason research "
     "girl guy moment air teacher force education".split()
 )
-
-
-def local_sh_port() -> str | None:
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    path = os.path.join(here, "recipe-tf-fbbc971", "scripts", "local.sh")
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                m = re.match(r"\s*(?:export\s+)?PORT=(\d+)\s*(?:#.*)?$", line)
-                if m:
-                    return m.group(1)
-    except OSError:
-        return None
-    return None
-
-
-def default_base() -> str:
-    url = os.environ.get("API_URL")
-    if url:
-        return url.rstrip("/")
-    port = os.environ.get("PORT") or local_sh_port() or "8888"
-    return f"http://127.0.0.1:{port}"
 
 
 def parse_sizes(text: str) -> list[int]:
@@ -233,7 +216,9 @@ def compare(a_path: str, b_path: str) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="TTFT-only measurement for a TensorFold server")
-    ap.add_argument("--url", default=default_base(), help="base URL, e.g. http://head:8888")
+    ap.add_argument("--url", default=default_base(), help="base URL (default http://127.0.0.1:8890)")
+    ap.add_argument("--allow-live", action="store_true",
+                    help="allow port 8888 or 18004; /metrics must still be idle")
     ap.add_argument("--model", default=os.environ.get("MODEL", DEFAULT_MODEL))
     ap.add_argument("--sizes", default="512,2048,8192,32768", help="prompt tokens, comma separated (k/m suffix ok)")
     ap.add_argument("--reps", type=int, default=3)
@@ -248,6 +233,8 @@ def main() -> int:
     if args.compare:
         return compare(*args.compare)
 
+    args.url = assert_trial_url(args.url, args.allow_live)
+    assert_idle(args.url)
     result = run(args)
     if args.out:
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
