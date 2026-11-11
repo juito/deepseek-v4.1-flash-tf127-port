@@ -38,10 +38,31 @@ python3 -I recipe-tf-fbbc971/tools/exact.py  # replies must not move
 | `ttft.env` | Interactive chat, 512K window | `MAX_TOKENS=8192`, `TF_DS_PROMPT_WINDOW_ROWS=128`, `TF_FILL_CHUNKS=1` + `TF_FILL_CUT_IN=8192`, `SPILL_GIB=64`, `GRAPH_CAP=128` |
 | `balanced.env` | Day-to-day at the full window | Full window, spill on, interleave 250, `GRAPH_CAP=128` |
 | `long-context.env` | 1M-token work | `POOL=2097152`, `KV_SHARD=1` (context, not TTFT) |
+| `residency.env` | Spend the RAM left after the weights | `POOL=2097152`, `KV_SHARD=0` — more kept conversations, full decode speed |
 
 Each profile must be measured, not trusted. `scripts/check-profiles.sh` rejects unknown keys
 (a typo would otherwise be silently ignored by the launcher), off-grid `CONTEXT`/`POOL`, and
 `POOL < CONTEXT`.
+
+## The RAM left over after the weights
+
+Read [`docs/spare-memory.md`](docs/spare-memory.md). With ~9 GiB free a Spark:
+
+- **It cannot buy bits.** EXL3 2.9 bpw is fixed in the checkpoint; no runtime path upcasts trellis
+  tensors into spare RAM. The only precision path is the EAQ v1.1 pack (27 indexer/compressor
+  linears as BF16) — a pack swap that changes the bits and invalidates the `exact.py` baseline.
+- **It cannot raise decode tok/s.** Decode depends on rows per round, drafts and bandwidth.
+- **It can buy residency.** `POOL` costs ~1 GiB a rank per 1M positions replicated (~0.55 sharded).
+  More pool keeps more conversations resident, so follow-ups resume instead of re-prefilling.
+
+```bash
+make plan FREE=9        # budget table + recommendation
+make profile NAME=residency
+```
+
+For 9 GiB the recommendation is `POOL=2097152` with `KV_SHARD=0`: the documented four-concurrent-
+500K case, ~2 GiB a rank, ~7 GiB headroom, and no sharding penalty. Leave the rest free — Engram
+reads use the page cache, and `GRAPH_CAP=128` is already the right bound.
 
 ## Keeping 2.9 bpw
 
@@ -71,11 +92,13 @@ filenames) and **0 of 18** recipe switches survive. `make triage` reproduces the
 ```
 docs/first-token.md      TTFT playbook: ranked levers, mechanism, cost, measurement protocol
 docs/quantization.md     2.9 bpw invariant, EAQ v1 vs v1.1, what must re-baseline
+docs/spare-memory.md     what the RAM left after the weights can and cannot buy
 docs/port-status.md      v1.2.7 triage, why 52/53 are blocked, validation gate
 profiles/*.env           layered presets, validated against config.sh/port.sh
 tools/ttft.py            TTFT-only bench: cold/warm, p50/p90, --compare
 scripts/profile.sh       write profiles/<name>.env into scripts/local.sh
 scripts/check-profiles.sh validate keys, grid alignment, POOL >= CONTEXT
+scripts/memory-plan.sh   KV-pool budget from the free GiB you actually see
 scripts/triage.sh        re-run the 53-patch triage against any tag
 recipe-tf-fbbc971/       the recipe verbatim at c7f2b85 (reference + runnable engine)
 triage.csv               machine-readable triage

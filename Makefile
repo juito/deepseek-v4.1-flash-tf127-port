@@ -4,12 +4,13 @@
 SHELL := /bin/bash
 RECIPE := recipe-tf-fbbc971
 
-.PHONY: help check profiles triage ttft bench compare profile
+.PHONY: help check profiles triage ttft bench compare profile plan
 
 help:
 	@echo "make check                 validate profiles, syntax, shell scripts (CI runs this)"
 	@echo "make triage                re-run the 53-patch triage against TF_TAG (default v1.2.7)"
 	@echo "make profile NAME=ttft     write scripts/local.sh from profiles/<name>.env"
+	@echo "make plan FREE=9           spend the RAM left after the weights (KV pool budget)"
 	@echo "make ttft OUT=runs/a.json  measure first token on a running server"
 	@echo "make bench OUT=runs/b.json prefill+decode bench on a running server"
 	@echo "make compare A=runs/a.json B=runs/b.json"
@@ -21,6 +22,7 @@ check:
 	@bash -n scripts/triage.sh && echo "bash OK: scripts/triage.sh"
 	@bash -n scripts/profile.sh && echo "bash OK: scripts/profile.sh"
 	@bash -n scripts/check-profiles.sh && echo "bash OK: scripts/check-profiles.sh"
+	@bash -n scripts/memory-plan.sh && echo "bash OK: scripts/memory-plan.sh"
 	@scripts/check-profiles.sh
 
 profiles:
@@ -44,3 +46,6 @@ compare:
 profile:
 	@test -n "$(NAME)" || { echo "usage: make profile NAME=ttft"; exit 2; }
 	@scripts/profile.sh $(NAME) $(FORCE)
+
+plan:
+	@scripts/memory-plan.sh $(or $(FREE),9)
