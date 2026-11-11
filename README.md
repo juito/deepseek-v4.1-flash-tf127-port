@@ -44,6 +44,13 @@ It does not replace the live container `dsv41-1017-exl3-tf`, the live tag
 | `balanced.env` | Day-to-day | `CONTEXT=524288`, spill on, interleave 250, `GRAPH_CAP=128` |
 | `long-context.env` | More resident history | `CONTEXT=524288`, `POOL=2097152`, `KV_SHARD=1` |
 | `residency.env` | Kept conversations, full decode | `CONTEXT=524288`, `POOL=2097152`, `KV_SHARD=0` |
+| `tf127-baseline.env` | v1.2.7 fair baseline | `PARALLEL=4`, `TF_DSV41_PREFILL=full`, resident 0.5 GiB |
+| `tf127-replay.env` | v1.2.7 TTFT trial | replay, NVMe session disk, 64 GiB budget, resident cap 3 GiB on both ranks |
+| `tf127-replay-2gib.env` | replay when the trough is under 4 GiB | resident cap 2 GiB |
+| `tf127-pf4k.env` | optional, exactness-gated | `TF_DSV41_PF_4K=1` (+0.66 GiB), `GM_V2=1`, replay |
+| `tf127-prefetch.env` | optional, exactness-gated | `TF_DSV41_PREFETCH_AHEAD=1` on the replay tier |
+| `tf127-cut-in.env` | short request during a long prefill | pieces on, cut-in 8192, interleave 0 |
+| `tf127-interleave.env` | fixed 250 ms decode budget | pieces on, `TF_DSV41_PREFILL_INTERLEAVE_MS=250` |
 
 `CONTEXT` is capped at **524288** in every profile. That is the live window. A run at
 655,360 killed a 464K-token turn. `TF_FILL_CHUNKS` turns the 0005 interleave off, so the
@@ -55,9 +62,10 @@ Each profile must be measured, not trusted. `scripts/check-profiles.sh` rejects 
 
 ## The RAM left over after the weights
 
-Read [`docs/spare-memory.md`](docs/spare-memory.md). **9 GiB free is an assumption, not a
-measurement.** The recipe records about **6.2–6.5 GiB `MemAvailable` after the load**. With
-whatever you actually have free:
+Read [`docs/spare-memory.md`](docs/spare-memory.md). **Nov 11 on the live Sparks:** SparkOne
+`MemAvailable` 6.96–6.98 GiB, 1.23 GiB truly free, headroom about 2–3 GiB. SparkTwo 8.59 GiB.
+The live prompt cache was full (512 MiB, 121 evictions, 95.2% prefix hits, average TTFT 1.77 s).
+With that headroom:
 
 - **It cannot buy bits.** EXL3 2.9 bpw is fixed in the checkpoint; no runtime path upcasts trellis
   tensors into spare RAM. The only precision path is the EAQ v1.1 pack (27 indexer/compressor
@@ -67,14 +75,15 @@ whatever you actually have free:
   More pool keeps more conversations resident, so follow-ups resume instead of re-prefilling.
 
 ```bash
-make plan FREE=6.5      # budget from a measured MemAvailable; FREE=9 is unmeasured
-make profile NAME=residency
+make plan                 # defaults to SparkOne's 6.97 GiB MemAvailable and says to leave POOL unset
+make profile NAME=tf127-replay
+scripts/engine-trial.sh --guard-only --profile profiles/tf127-replay.env
 ```
 
-`scripts/memory-plan.sh` still recommends `POOL=2097152` with `KV_SHARD=0` at 6.5 GiB free
-(~2 GiB a rank). The ~7 GiB headroom in the old write-up assumed 9 GiB free, which this
-repository has not measured. Leave the rest free — Engram reads use the page cache, and
-`GRAPH_CAP=128` is already the right bound.
+`scripts/memory-plan.sh` no longer recommends spending that `MemAvailable` on `POOL`.
+The v1.2.7 profiles cap `TF_DSV41_SESSION_RESIDENT_GIB` at 3 (fallback 2) and leave the
+12.2 GiB engine reserve alone. Engram reads use the page cache. `GRAPH_CAP=128` stays the
+fork bound; the v1.2.7 profiles do not set it.
 
 ## Keeping 2.9 bpw
 
@@ -115,7 +124,9 @@ docs/trial-runbook.md    side image, stop-live, matched gate, rollback
 profiles/*.env           layered presets, validated against config.sh/port.sh
 tools/ttft.py            TTFT on port 8890; refuses 8888 and 18004
 tools/bench.py           same guard, then the recipe bench
-scripts/trial.sh         the only start path (distinct container, tag, port, host)
+scripts/trial.sh         start path for the current recipe pin (distinct container, tag, port, host)
+scripts/engine-trial.sh  start path for the v1.2.7 image
+scripts/gate.sh          on-hardware gate: TTFT, restore, 4-stream, exact.py, MemAvailable floor
 scripts/profile.sh       write profiles/<name>.env into the recipe's local.sh
 scripts/check-profiles.sh validate keys, grid, CONTEXT <= 524288, fill vs interleave
 scripts/memory-plan.sh   KV-pool budget from the free GiB you actually see

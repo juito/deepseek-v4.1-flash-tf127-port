@@ -41,6 +41,54 @@ and the command it runs is `docker stop` (on the worker too, when `WORKER` is se
 There is no `start.sh` at the repository root. Do not run `recipe-tf-fbbc971/start.sh` by hand:
 its defaults are the live container, port 8888, and `HOST=0.0.0.0`.
 
+## Nov 11 memory, and which start path
+
+SparkOne `MemAvailable` 6.96–6.98 GiB (1.23 GiB truly free; the rest is Engram page cache
+and margin). Headroom about 2–3 GiB. SparkTwo 8.59 GiB. Memguard kills at 2.5 GiB for 4 s
+(hard 1 GiB). Do not lower the 12.2 GiB engine reserve. Keep `CONTEXT=524288`.
+
+The live prompt cache was full: 512 MiB, 121 evictions, 95.2% prefix hit rate, average TTFT
+1.77 s.
+
+| Start path | Image | Profile |
+|---|---|---|
+| `scripts/trial.sh` | current recipe pin, tag `tf127-trial-<recipe hash>` | `ttft-fill`, `ttft-interleave`, `balanced`, `long-context`, `residency` |
+| `scripts/engine-trial.sh` | `tensorfold-dsv41:tf127-trial-<port hash>` from `engine/PIN` plus `engine/patches/` | `tf127-baseline`, `tf127-replay`, `tf127-replay-2gib`, and the optional profiles |
+
+`tf127-replay` is the TTFT trial: `TF_DSV41_PREFILL=replay`, `TF_DSV41_SESSION_DISK` on
+local NVMe, disk budget 64 GiB, `TF_DSV41_SESSION_RESIDENT_GIB=3` on **both** ranks. Unset
+is unlimited. A mismatch refuses both ranks. If the trough goes under 4 GiB, switch to
+`tf127-replay-2gib`. `tf127-baseline` is the fair live match: `PARALLEL=4`, prefill `full`,
+resident 0.5 GiB. `tf127-pf4k` (+0.66 GiB) and `tf127-prefetch` stay off until token equality
+against replay passes. Weights stay EAQ v1 `45ee5d0f` (KL 0.0137, top-1 96.6%). v1.2.7 has
+no mixed-pack loader.
+
+Upstream `#2182`, not remeasured here: a 319K restore in 1.2–1.4 s against 155–178 s cold,
+replies byte-identical.
+
+```bash
+scripts/fetch-engine.sh
+# on a Spark:
+scripts/build-image.sh
+MODEL=/path/to/eaq-v1 TF_DSV41_ASSETS=/path/to/assets scripts/prepare-assets.sh
+# point TF_DSV41_SESSION_DISK in the profile at this Spark's local NVMe, then:
+scripts/engine-trial.sh --stop-live --profile profiles/tf127-replay.env restart
+# on SparkTwo, same profile, RANK_OVERRIDE=1, same resident cap
+```
+
+`scripts/gate.sh` aborts if `MemAvailable` is under 3.5 GiB on either node. Live cold refs
+it compares against: 8k **13.80 s**, 131k **57.89 s**. 4-stream decode that day was
+**102.7 tok/s** (pass floor 95% of that). It also records 32k, warm TTFT, a restart then
+the same 8k prompt, a short request during a long prefill, and `exact.py` 31/31.
+
+```bash
+scripts/gate.sh --url http://100.78.243.41:8890 \
+  --exact-old runs/exact-old.json \
+  --profile tf127-replay \
+  --out runs/gate.json
+# pf4k or prefetch also need --token-baseline runs/replay-sha.json
+```
+
 ## 1. Build the side image and start the trial
 
 Keep the live pins. The trial is an engine/scheduling trial of the same weights, so
@@ -147,9 +195,12 @@ for that pass), then the trial, then the old image again.
    python3 -I tools/ttft.py --compare runs/ttft-old.json runs/ttft-trial.json
    ```
 
-   The 128k cold row in the recipe is **63.28 s**. Warm resume of a kept prefix is
-   **1.5–1.9 s** (159k and 261k histories). A spill resume of a 237k conversation was
-   **1.7 s** against **118 s** recomputed.
+   The recipe's 128k cold row is **63.28 s**. The Nov 11 live cold refs the gate uses are
+   **13.80 s at 8k** and **57.89 s at 131k**. 4-stream decode that day was **102.7 tok/s**.
+   Warm resume of a kept prefix in the recipe is **1.5–1.9 s** (159k and 261k histories).
+   A spill resume of a 237k conversation was **1.7 s** against **118 s** recomputed.
+   `scripts/gate.sh` is the bundled form of this list, including restart-then-restore and
+   a short request during a long prefill, and it aborts under 3.5 GiB `MemAvailable`.
 
 5. **Short quality and tool-call set.** `smoke.py` already checks a tool call, stop
    strings, and a greedy pair. `toolcheck.py` checks one array-argument call. Together they

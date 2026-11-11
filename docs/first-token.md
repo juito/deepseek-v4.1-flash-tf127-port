@@ -36,6 +36,26 @@ fast they make a kernel.
 | 10 | **`ROUND_ROWS=32`** (a later `KIT_REF`) | A 32-row window needs a kit with `_rowmm_parts` variants above 16 | **Unproven for this model.** No DeepSeek-V4.1 measurement exists in the recipe; wider kernels are still under review (#31) | Not available on the pinned kit: `start.sh` rejects `ROUND_ROWS` above 16. Treat any claim about it as unmeasured |
 | — | **`KV_SHARD=1`** | Splits the KV pool one part a Spark, halving KV memory | **Not a TTFT lever**: decode is 1–4% slower. It buys memory headroom, which indirectly protects kept states | Use it for context, not for TTFT |
 
+## v1.2.7 trial, from the Nov 11 measurement
+
+The fork levers above stay the comparison for `scripts/trial.sh` on the current pin. The
+v1.2.7 profiles use different names, checked against tag `v1.2.7` (`93a2e93ece`):
+
+| Profile | What it sets |
+|---|---|
+| `tf127-baseline.env` | `PARALLEL=4`, `TF_DSV41_PREFILL=full`, resident cap 0.5 GiB. Fair match to the live shape. The live prompt cache was 512 MiB, 121 evictions, 95.2% prefix hits, average TTFT 1.77 s |
+| `tf127-replay.env` | `TF_DSV41_PREFILL=replay`, session disk on local NVMe, disk budget 64 GiB, resident cap **3 GiB on both ranks**. This is the TTFT trial. Upstream `#2182`: a 319K restore in 1.2–1.4 s against 155–178 s cold. That number is upstream's |
+| `tf127-replay-2gib.env` | The same with the cap at 2 GiB, for a `MemAvailable` trough under 4 GiB |
+| `tf127-pf4k.env` | Optional. `TF_DSV41_PF_4K=1` plus the memory acknowledgement, `TF_DSV41_GM_V2=1`, and replay. About **+0.66 GiB**. Token equality against replay before you keep it |
+| `tf127-prefetch.env` | Optional. `TF_DSV41_PREFETCH_AHEAD=1` on the replay tier. Token equality against replay |
+| `tf127-cut-in.env` | Replay plus `TF_DSV41_PREFILL_PIECES=1` and `TF_DSV41_PREFILL_CUT_IN=8192` (alias of `TF_DSV41_BATCH_SHORT`). Interleave 0 |
+| `tf127-interleave.env` | The same pieces with `TF_DSV41_PREFILL_INTERLEAVE_MS=250` |
+
+SparkOne's headroom is about 2–3 GiB (`MemAvailable` 6.96–6.98 GiB, 1.23 GiB truly free).
+SparkTwo was 8.59 GiB. Do not lower the 12.2 GiB engine reserve. Do not raise `POOL`.
+`CONTEXT` stays 524288. Live cold refs for the gate: 8k **13.80 s**, 131k **57.89 s**.
+4-stream decode that day was **102.7 tok/s**.
+
 ## What not to do
 
 - **Do not requantize.** 2.9 bpw EAQ v1 is what the recorded `tools/exact.py` baseline was taken on.
