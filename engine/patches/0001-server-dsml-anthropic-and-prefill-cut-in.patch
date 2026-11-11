@@ -1,0 +1,609 @@
+diff --git a/zig/src/families/deepseek_v41/kv/sched.zig b/zig/src/families/deepseek_v41/kv/sched.zig
+index 6f6e00c..32112f1 100644
+--- a/zig/src/families/deepseek_v41/kv/sched.zig
++++ b/zig/src/families/deepseek_v41/kv/sched.zig
+@@ -20,19 +20,26 @@ pub fn snapshotPoint(n: u64) u64 {
+ }
+ 
+ /// A piece of t s is followed by >= t (1 - share) / share s (and a round) of decode; none decoding: no wait.
++/// `interleave_s`, when set, replaces that proportion with a fixed decode budget (0: no time yield).
+ pub const Fairness = struct {
+     share: f64 = 0.5,
+     debt: f64 = 0.0,
+     rounds: u64 = 1,
++    interleave_s: ?f64 = null,
+ 
+     pub fn allow(f: *const Fairness, decoding: bool) bool {
+         if (!decoding) return true;
++        if (f.interleave_s) |cap| {
++            if (cap <= 0.0) return true;
++            return f.debt <= 0.0;
++        }
+         return f.rounds >= 1 and f.debt <= 0.0;
+     }
+ 
+     pub fn after(f: *Fairness, piece_s: f64, round_s: f64, prefilling: bool) void {
+         if (piece_s > 0.0) {
+-            f.debt = @max(f.debt, 0.0) + piece_s * (1.0 - f.share) / f.share;
++            const owed = if (f.interleave_s) |cap| cap else piece_s * (1.0 - f.share) / f.share;
++            f.debt = @max(f.debt, 0.0) + owed;
+             f.rounds = 0;
+         }
+         if (round_s > 0.0) {
+@@ -168,8 +175,9 @@ pub const Floor = struct {
+ 
+ pub const Settings = struct {
+     rows: u64 = 2048, // TF_DSV41_PREFILL_ROWS: rows of prompt a round (the forward's segment)
+-    short: u64 = 512, // TF_DSV41_BATCH_SHORT: prompts with at most this many tokens left go every round
++    short: u64 = 512, // TF_DSV41_BATCH_SHORT, or TF_DSV41_PREFILL_CUT_IN when BATCH_SHORT is unset
+     share: f64 = 0.5, // TF_DSV41_PREFILL_SHARE
++    interleave_s: ?f64 = null, // TF_DSV41_PREFILL_INTERLEAVE_MS / 1000; null keeps the share; 0 yields no decode debt
+     long_prompt: u64 = 32768, // TF_DSV41_LONG_PROMPT / TF_DSV41_PREFILL_CONCURRENT (0: no limit)
+     concurrent: u64 = 1,
+     session_min: u64 = 64, // shorter prompts are not snapshotted
+@@ -182,6 +190,12 @@ pub const Settings = struct {
+         var s: Settings = .{};
+         if (try envInt("TF_DSV41_PREFILL_ROWS")) |v| s.rows = v;
+         if (try envInt("TF_DSV41_BATCH_SHORT")) |v| s.short = v;
++        if ((try envInt("TF_DSV41_BATCH_SHORT")) == null) {
++            if (try envInt("TF_DSV41_PREFILL_CUT_IN")) |v| {
++                s.short = v;
++            }
++        }
++        if (try envInt("TF_DSV41_PREFILL_INTERLEAVE_MS")) |v| s.interleave_s = @as(f64, @floatFromInt(v)) / 1000.0;
+         if (try envFloat("TF_DSV41_PREFILL_SHARE")) |v| s.share = v;
+         if (try envInt("TF_DSV41_LONG_PROMPT")) |v| s.long_prompt = v;
+         if (try envInt("TF_DSV41_PREFILL_CONCURRENT")) |v| s.concurrent = v;
+@@ -325,7 +339,7 @@ pub const Planner = struct {
+     mem_since: std.AutoHashMapUnmanaged(usize, f64) = .empty, // a request the floor holds back: since when (seconds)
+ 
+     pub fn init(gpa: std.mem.Allocator, s: Settings) Planner {
+-        return .{ .gpa = gpa, .s = s, .fair = .{ .share = s.share } };
++        return .{ .gpa = gpa, .s = s, .fair = .{ .share = s.share, .interleave_s = s.interleave_s } };
+     }
+ 
+     pub fn deinit(p: *Planner) void {
+@@ -548,6 +562,40 @@ test "piece_end, snapshot_point and the fair share as plan.py / sessions.py / ba
+     try std.testing.expectEqualSlices(u64, &.{ 2048, 1024, 512 }, (Adapt{}).steps(2048, &buf));
+ }
+ 
++test "a short prompt cuts in while fairness holds a long prefill" {
++    var p = Planner.init(std.testing.allocator, .{ .short = 8192, .rows = 2048 });
++    defer p.deinit();
++    p.fair.debt = 10;
++    p.fair.rounds = 0;
++    try p.seqs.append(p.gpa, .{ .key = 1, .n = 200000, .submitted = 1, .done = 4096, .save_at = null });
++    try p.seqs.append(p.gpa, .{ .key = 2, .n = 4001, .submitted = 2, .done = 0, .save_at = null });
++    try p.seqs.append(p.gpa, .{ .key = 3, .n = 16, .submitted = 0, .done = 15, .decoding = true, .save_at = null });
++    var out: std.ArrayList(Piece) = .empty;
++    defer out.deinit(p.gpa);
++    var finals: std.ArrayList(usize) = .empty;
++    defer finals.deinit(p.gpa);
++    try p.plan(null, &out, &finals);
++    var saw_short = false;
++    var saw_long = false;
++    for (out.items) |piece| {
++        if (piece.key == 2) saw_short = true;
++        if (piece.key == 1) saw_long = true;
++    }
++    try std.testing.expect(saw_short);
++    try std.testing.expect(!saw_long);
++}
++
++test "TF_DSV41_PREFILL_INTERLEAVE_MS replaces the share proportion" {
++    var none: Fairness = .{ .interleave_s = 0 };
++    none.after(0.4, 0, true);
++    try std.testing.expectEqual(@as(f64, 0), none.debt);
++    try std.testing.expect(none.allow(true));
++    var cap: Fairness = .{ .interleave_s = 0.25 };
++    cap.after(0.4, 0, true);
++    try std.testing.expectEqual(@as(f64, 0.25), cap.debt);
++    try std.testing.expect(!cap.allow(true));
++}
++
+ test "a round whose last piece rounds up past the budget left ends the round (batch.py: budget <= 0)" {
+     // a piece rounding up past the budget left ends the round (an unsigned budget once overflowed here)
+     var p = Planner.init(std.testing.allocator, .{});
+diff --git a/zig/src/families/deepseek_v41/serve/template.zig b/zig/src/families/deepseek_v41/serve/template.zig
+index 0e0516a..ae1b619 100644
+--- a/zig/src/families/deepseek_v41/serve/template.zig
++++ b/zig/src/families/deepseek_v41/serve/template.zig
+@@ -323,7 +323,15 @@ fn messagesOf(r: *R, messages: Value, o: Options) Error![]Msg {
+             .assistant => {
+                 msg.content = try text(r, m.get("content"), "content", i, o.image);
+                 var rc = m.get("reasoning_content") orelse Value.null;
+-                if (rc == .null) rc = m.get("reasoning") orelse Value.null;
++                // An empty reasoning_content yields to a non-empty `reasoning` (LiteLLM). A missing
++                // reasoning_content still takes `reasoning` as-is, including an empty string.
++                if (rc == .null or (rc == .string and rc.string.len == 0)) {
++                    if (m.get("reasoning")) |alt| {
++                        if (rc == .null or (alt == .string and alt.string.len > 0)) {
++                            rc = alt;
++                        }
++                    }
++                }
+                 if (rc != .null) msg.reasoning = (try text(r, rc, "reasoning_content", i, null)).bytes;
+                 if (m.get("tool_calls")) |tc| if (tc.truthy()) {
+                     if (tc != .array) return r.refuse("messages[{d}].tool_calls must be a list", .{i});
+@@ -473,6 +481,18 @@ pub fn generationPrefix(thinking: bool) []const u8 {
+     return if (thinking) ASSISTANT ++ THINK_OPEN else ASSISTANT ++ THINK_END;
+ }
+ 
++test "an empty reasoning_content falls through to reasoning" {
++    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    const msgs = (try json.parseText(a,
++        \\[{"role":"user","content":"hi"},{"role":"assistant","reasoning_content":"","reasoning":"kept","content":"ok"}]
++    )).ok;
++    var problem: Problem = .{};
++    const got = try render(a, msgs, .{ .drop_thinking = false }, &problem);
++    try std.testing.expect(std.mem.indexOf(u8, got, THINK_OPEN ++ "kept" ++ THINK_END) != null);
++}
++
+ test "a thinking conversation with a tool call and an out-of-order result" {
+     const a = std.testing.allocator;
+     var arena = std.heap.ArenaAllocator.init(a);
+diff --git a/zig/src/server/anthropic_translate.zig b/zig/src/server/anthropic_translate.zig
+index 92831f5..2f81105 100644
+--- a/zig/src/server/anthropic_translate.zig
++++ b/zig/src/server/anthropic_translate.zig
+@@ -99,18 +99,10 @@ fn messages(cx: *Cx, value: ?Value, system: ?Value) errors.Refused!Value {
+         try m.put(a, "content", .{ .string = joined.items });
+         try out.append(a, .{ .object = m });
+     };
+-    for (list.array, 0..) |message, index| {
++    for (list.array) |message| {
+         if (message != .object or !roleIs(message, &.{ "user", "assistant", "system" })) return cx.refuse("message role must be user, assistant or system");
+         const role = message.get("role").?.string;
+         if (std.mem.eql(u8, role, "system")) {
+-            const previous: Value = if (index > 0) list.array[index - 1] else .{ .object = try json.newObject(a) };
+-            const following: Value = if (index + 1 < list.array.len) list.array[index + 1] else blk: {
+-                const f = try json.newObject(a);
+-                try f.put(a, "role", .{ .string = "assistant" });
+-                break :blk .{ .object = f };
+-            };
+-            if (previous != .object or !roleIs(previous, &.{ "user", "system" }) or following != .object or !roleIs(following, &.{ "assistant", "system" }))
+-                return cx.refuse("mid-conversation system messages must follow a user turn and precede an assistant or end");
+             const clear = message.get("clear_at");
+             const clear_ok = clear == null or clear.? == .null or (clear.? == .string and std.mem.eql(u8, clear.?.string, "never"));
+             if (!clear_ok or json.truthyField(message, "output_config")) return cx.refuse("turn-scoped system messages and per-message output_config are unsupported");
+@@ -227,12 +219,13 @@ pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
+         try chat.put(a, "stop", stops);
+     }
+     if (body.field("context_management")) |context| {
+-        const allowed = (try json.parse(a, "{\"type\": \"clear_thinking_20251015\", \"keep\": \"all\"}")).ok;
+         const edits = context.get("edits") orelse Value{ .array = &.{} };
+         const ok = context == .object and edits == .array and for (edits.array) |e| {
+-            if (!json.equal(e, allowed)) break false;
++            if (e != .object) break false;
++            const et = e.get("type") orelse Value.null;
++            if (et != .string or !std.mem.startsWith(u8, et.string, "clear_thinking_")) break false;
+         } else true;
+-        if (!ok) return cx.refuse("context_management supports clear_thinking with keep: all only");
++        if (!ok) return cx.refuse("context_management supports clear_thinking edits only");
+     }
+     for ([_][]const u8{ "container", "mcp_servers", "service_tier" }) |name| if (body.field(name)) |v| {
+         const fine = (v == .array and v.array.len == 0) or (v == .string and std.mem.eql(u8, v.string, "auto"));
+@@ -312,10 +305,13 @@ pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
+     try chat.put(a, "chat_template_kwargs", .{ .object = kwargs });
+     if (!enabled) try chat.put(a, "reasoning_effort", .{ .string = "none" });
+     if (std.mem.eql(u8, t, "enabled")) {
+-        const budget = positiveInt(thinking.get("budget_tokens"));
+-        const limit = if (body.get("max_tokens")) |m| m.int64() orelse std.math.maxInt(i64) else 0;
+-        if (budget == null or (!count and budget.? >= limit)) return cx.refuse("thinking.budget_tokens must be positive and less than max_tokens");
+-        try chat.put(a, "thinking_budget", thinking.get("budget_tokens").?);
++        // Absent or null budget_tokens uses the server default, as an OpenAI request without thinking_budget does.
++        if (thinking.get("budget_tokens")) |given| if (given != .null) {
++            const budget = positiveInt(given);
++            const limit = if (body.get("max_tokens")) |m| m.int64() orelse std.math.maxInt(i64) else 0;
++            if (budget == null or (!count and budget.? >= limit)) return cx.refuse("thinking.budget_tokens must be positive and less than max_tokens");
++            try chat.put(a, "thinking_budget", given);
++        };
+     }
+     return .{ .object = chat };
+ }
+diff --git a/zig/src/server/chat_generation.zig b/zig/src/server/chat_generation.zig
+index e61bc84..21ffa43 100644
+--- a/zig/src/server/chat_generation.zig
++++ b/zig/src/server/chat_generation.zig
+@@ -274,6 +274,11 @@ pub const Generation = struct {
+         const decode_s: f64 = if (prefilled) |p| @max(0, seconds(finished_ns - p)) else 0;
+         const decode_tokens = g.collected.items.len -| 1;
+         const runtime = try json.newObject(a);
++        if (g.tools.len > 0) if (@import("output_diagnostics.zig").toolWarning(content)) |warning| {
++            const code = @tagName(warning);
++            try runtime.put(a, "tool_parse_warning", .{ .string = code });
++            log.line("warning: {s} tool_parse_warning={s}", .{ g.reply_id, code });
++        };
+         try runtime.put(a, "enable_thinking", .{ .bool = thinking });
+         try runtime.put(a, "reasoning_effort", if (!thinking) .{ .string = "none" } else if (effort) |e| .{ .string = e } else .null);
+         try runtime.put(a, "engine", .{ .string = g.srv.info.name });
+diff --git a/zig/src/server/output_diagnostics.zig b/zig/src/server/output_diagnostics.zig
+new file mode 100644
+index 0000000..d3355b3
+--- /dev/null
++++ b/zig/src/server/output_diagnostics.zig
+@@ -0,0 +1,42 @@
++//! Conservative output diagnostics. A warning never repairs or reclassifies content.
++const std = @import("std");
++
++pub const ToolWarning = enum { orphan_dsml_closers };
++
++/// Recognize only a whole answer made of known DSML closing tags and ASCII whitespace.
++pub fn toolWarning(answer: []const u8) ?ToolWarning {
++    const blanks = " \t\r\n";
++    const closers = [_][]const u8{
++        "</\u{ff5c}DSML\u{ff5c} parameter>",
++        "</\u{ff5c}DSML\u{ff5c} invoke>",
++        "</\u{ff5c}DSML\u{ff5c} calls>",
++        "</\u{ff5c}DSML\u{ff5c}parameter>",
++        "</\u{ff5c}DSML\u{ff5c}invoke>",
++        "</\u{ff5c}DSML\u{ff5c}tool_calls>",
++    };
++    var rest = std.mem.trim(u8, answer, blanks);
++    if (rest.len == 0) return null;
++    while (rest.len > 0) {
++        const n = for (closers) |tag| {
++            if (std.mem.startsWith(u8, rest, tag)) break tag.len;
++        } else return null;
++        rest = std.mem.trimStart(u8, rest[n..], blanks);
++    }
++    return .orphan_dsml_closers;
++}
++
++test "output diagnostic is limited to complete orphan closing tags" {
++    const close = "</\u{ff5c}DSML\u{ff5c} calls>";
++    try std.testing.expectEqual(ToolWarning.orphan_dsml_closers, toolWarning(" \n" ++ close ++ "\t" ++ close ++ "\r").?);
++    try std.testing.expectEqual(ToolWarning.orphan_dsml_closers, toolWarning("</\u{ff5c}DSML\u{ff5c}parameter></\u{ff5c}DSML\u{ff5c}invoke></\u{ff5c}DSML\u{ff5c}tool_calls>").?);
++    for ([_][]const u8{
++        "",
++        " \t",
++        "\"" ++ close ++ "\"",
++        "```\n" ++ close ++ "\n```",
++        "Example: " ++ close,
++        close ++ " suffix",
++        "<\u{ff5c}DSML\u{ff5c} calls>" ++ close,
++        "</\u{ff5c}DSML\u{ff5c} calls",
++    }) |text| try std.testing.expect(toolWarning(text) == null);
++}
+diff --git a/zig/src/server/reply_text.zig b/zig/src/server/reply_text.zig
+index 6f942d1..4838df5 100644
+--- a/zig/src/server/reply_text.zig
++++ b/zig/src/server/reply_text.zig
+@@ -24,9 +24,11 @@ pub const calls = [_][2][]const u8{
+     .{ "<|tool_call_start|>", "<|tool_call_end|>" },
+     .{ "<\u{ff5c}DSML\u{ff5c} calls>", "</\u{ff5c}DSML\u{ff5c} calls>" },
+     .{ "<｜DSML｜function_calls>", "</｜DSML｜function_calls>" },
++    // Two newlines the model writes before V4.1's spaced block. Appended so calls[2], [4] and [5] stay put.
++    .{ "\n\n<\u{ff5c}DSML\u{ff5c} calls>", "</\u{ff5c}DSML\u{ff5c} calls>" },
+ };
+ /// Each opener's payload lead: Gemma 4's ``call:`` (26B: ``:``), DSML's invoke; the other openers have none.
+-const leads = [calls.len][]const []const u8{ &.{}, &.{ "call:", ":" }, &.{"<\u{ff5c}DSML\u{ff5c}invoke"}, &.{}, &.{"<\u{ff5c}DSML\u{ff5c} invoke"}, &.{"<｜DSML｜invoke"} };
++const leads = [calls.len][]const []const u8{ &.{}, &.{ "call:", ":" }, &.{"<\u{ff5c}DSML\u{ff5c}invoke"}, &.{}, &.{"<\u{ff5c}DSML\u{ff5c} invoke"}, &.{"<｜DSML｜invoke"}, &.{"<\u{ff5c}DSML\u{ff5c} invoke"} };
+ 
+ /// The call openers a stream watches for, with their payload leads.
+ pub const Openers = struct { calls: []const [2][]const u8, leads: []const []const []const u8 };
+@@ -66,6 +68,113 @@ fn find(text: []const u8, tag: []const u8) ?usize {
+     return findTag(text, 0, tag);
+ }
+ 
++
++/// The invoke and parameter tags of a DSML spelling, by its block opener (null: not a DSML block this walk reads).
++const Dsml = struct { invoke_open: []const u8, invoke_close: []const u8, param_open: []const u8, param_close: []const u8, attr_required: bool };
++
++fn dsmlTags(opener: []const u8) ?Dsml {
++    const D = "\u{ff5c}DSML\u{ff5c}";
++    if (std.mem.eql(u8, opener, "<" ++ D ++ " calls>") or std.mem.eql(u8, opener, "\n\n<" ++ D ++ " calls>")) return .{ .invoke_open = "<" ++ D ++ " invoke name=\"", .invoke_close = "</" ++ D ++ " invoke>", .param_open = "<" ++ D ++ " parameter name=\"", .param_close = "</" ++ D ++ " parameter>", .attr_required = false };
++    if (std.mem.eql(u8, opener, "<" ++ D ++ "tool_calls>")) return .{ .invoke_open = "<" ++ D ++ "invoke name=\"", .invoke_close = "</" ++ D ++ "invoke>", .param_open = "<" ++ D ++ "parameter name=\"", .param_close = "</" ++ D ++ "parameter>", .attr_required = true };
++    return null;
++}
++
++/// Whether every ``closer`` in an invoke's body lies inside a parameter value.
++fn closersInValues(body: []const u8, closer: []const u8, tags: Dsml) bool {
++    var c = findTag(body, 0, closer);
++    var at_param: usize = 0;
++    while (c) |at| {
++        const ps = findTag(body, at_param, tags.param_open) orelse return false;
++        at_param = ps + 1;
++        const ns = ps + tags.param_open.len;
++        const nq = std.mem.indexOfScalarPos(u8, body, ns, '"') orelse continue;
++        if (!tags.attr_required and nq == ns) continue;
++        var v = nq + 1;
++        if (std.mem.startsWith(u8, body[v..], " string=\"true\"")) {
++            v += " string=\"true\"".len;
++        } else if (std.mem.startsWith(u8, body[v..], " string=\"false\"")) {
++            v += " string=\"false\"".len;
++        } else if (tags.attr_required) continue;
++        if (v >= body.len or body[v] != '>') continue;
++        v += 1;
++        const pe = findTag(body, v, tags.param_close) orelse continue;
++        if (at < v) return false;
++        var next: ?usize = at;
++        while (next) |n| {
++            if (n >= pe) break;
++            next = findTag(body, n + closer.len, closer);
++        }
++        c = next;
++        at_param = pe + tags.param_close.len;
++    }
++    return true;
++}
++
++fn begins(rest: []const u8, tag: []const u8) bool {
++    return rest.len < tag.len and std.mem.startsWith(u8, tag, rest);
++}
++
++const Walk = union(enum) { closer: usize, more, broken };
++
++/// Reads a DSML block from just past its opener. A closer inside a parameter value does not end the block.
++fn walkDsml(text: []const u8, from: usize, tags: Dsml, closer: []const u8) Walk {
++    var p = from;
++    while (true) {
++        while (p < text.len and isSpaceByte(text[p])) p += 1;
++        if (p >= text.len) return .more;
++        const rest = text[p..];
++        if (std.mem.startsWith(u8, rest, closer)) return .{ .closer = p };
++        if (!std.mem.startsWith(u8, rest, tags.invoke_open)) return if (begins(rest, closer) or begins(rest, tags.invoke_open)) .more else .broken;
++        const ns = p + tags.invoke_open.len;
++        const q = std.mem.indexOfScalarPos(u8, text, ns, '"') orelse
++            return if (std.mem.indexOfScalar(u8, text[ns..], '<') != null) .broken else .more;
++        if (std.mem.indexOfScalar(u8, text[ns..q], '<') != null) return .broken;
++        if (q + 2 > text.len) return .more;
++        if (!std.mem.startsWith(u8, text[q..], "\">")) return .broken;
++        const e = findTag(text, q + 2, tags.invoke_close) orelse return .more;
++        if (!closersInValues(text[q + 2 .. e], closer, tags)) return .broken;
++        p = e + tags.invoke_close.len;
++    }
++}
++
++fn wholeInvokes(region: []const u8, tags: Dsml) usize {
++    var n: usize = 0;
++    var pos: usize = 0;
++    while (findTag(region, pos, tags.invoke_open)) |s| {
++        pos = s + 1;
++        const ns = s + tags.invoke_open.len;
++        const q = std.mem.indexOfScalarPos(u8, region, ns, '"') orelse continue;
++        if (q == ns or !std.mem.startsWith(u8, region[q..], "\">")) continue;
++        const e = findTag(region, q + 2, tags.invoke_close) orelse continue;
++        pos = e + tags.invoke_close.len;
++        n += 1;
++    }
++    return n;
++}
++
++/// Index of the block closer. A DSML value is not escaped, so it can hold the block closer. The longer reading is
++/// kept only when it yields strictly more whole invokes than splitting at the first closer. While streaming, a block
++/// still being written stays open (null).
++pub fn blockEnd(text: []const u8, from: usize, opener: []const u8, closer: []const u8, finished: bool) ?usize {
++    const first = findTag(text, from, closer) orelse return null;
++    const tags = dsmlTags(opener) orelse return first;
++    switch (walkDsml(text, from, tags, closer)) {
++        .closer => |at| {
++            if (at == first) return at;
++            var split = wholeInvokes(text[from..first], tags);
++            var pos = first + closer.len;
++            while (findTag(text[0..at], pos, opener)) |o| {
++                const e = findTag(text, o + opener.len, closer) orelse break;
++                split += wholeInvokes(text[o + opener.len .. e], tags);
++                pos = e + closer.len;
++            }
++            return if (wholeInvokes(text[from..at], tags) > split) at else first;
++        },
++        .more => return if (finished) first else null,
++        .broken => return first,
++    }
++}
++
+ pub fn isChannel(m: Markers) bool {
+     return std.mem.eql(u8, m.close, channel_markers.close);
+ }
+@@ -235,14 +344,18 @@ pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finishe
+                 continue;
+             },
+         }
+-        const end = findTag(text, after, o.calls[which][1]) orelse {
++        const end = if (dsmlTags(o.calls[which][0]) != null)
++            blockEnd(text, after, o.calls[which][0], o.calls[which][1], finished)
++        else
++            findTag(text, after, o.calls[which][1]);
++        const closed = end orelse {
+             // a finished reply's envelope that never closed is text, as tool_parse.parse keeps it in the content
+             if (finished) try out.appendSlice(a, text[start.?..]);
+             return out.items;
+         };
+         // Final parsing may retain this envelope, so later prose must not overtake it.
+         if (defer_closed) return out.items;
+-        pos = end + o.calls[which][1].len;
++        pos = closed + o.calls[which][1].len;
+     }
+ }
+ 
+@@ -580,3 +693,23 @@ pub fn deltaOf(a: Allocator, key: []const u8, text: []const u8) Allocator.Error!
+     try o.put(a, key, .{ .string = text });
+     return .{ .object = o };
+ }
++
++test "a spaced DSML block hides the two newlines before its opener" {
++    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
++    defer arena.deinit();
++    const D = "\u{ff5c}DSML\u{ff5c}";
++    const text = "hello\n\n<" ++ D ++ " calls>\n<" ++ D ++ " invoke name=\"lookup\">\n<" ++ D ++ " parameter name=\"n\" string=\"false\">1</" ++ D ++ " parameter>\n</" ++ D ++ " invoke>\n</" ++ D ++ " calls>";
++    const shown = try hideToolCalls(arena.allocator(), text, true);
++    try std.testing.expectEqualStrings("hello", shown);
++}
++
++test "a DSML value that quotes the block closer does not end the block" {
++    const D = "\u{ff5c}DSML\u{ff5c}";
++    const open = "<" ++ D ++ " calls>";
++    const close = "</" ++ D ++ " calls>";
++    const body = "\n<" ++ D ++ " invoke name=\"lookup\">\n<" ++ D ++ " parameter name=\"n\" string=\"false\">see " ++ close ++ " inside</" ++ D ++ " parameter>\n</" ++ D ++ " invoke>\n";
++    const text = open ++ body ++ close;
++    const at = blockEnd(text, open.len, open, close, true).?;
++    try std.testing.expectEqual(text.len - close.len, at);
++    try std.testing.expect(blockEnd(text, open.len, open, close, false) != null);
++}
+diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
+index 1a9e2c8..350f675 100644
+--- a/zig/src/server/root.zig
++++ b/zig/src/server/root.zig
+@@ -56,6 +56,7 @@ test {
+     _ = @import("fields.zig");
+     _ = @import("reply_text.zig");
+     _ = @import("tool_parse.zig");
++    _ = @import("output_diagnostics.zig");
+     _ = @import("tool_lfm2.zig");
+     _ = @import("tool_lfm2_stream_test.zig");
+     _ = @import("tool_minimax.zig");
+diff --git a/zig/src/server/tool_dsml.zig b/zig/src/server/tool_dsml.zig
+index 170c20c..504aa09 100644
+--- a/zig/src/server/tool_dsml.zig
++++ b/zig/src/server/tool_dsml.zig
+@@ -30,8 +30,13 @@ fn spelled(comptime block: [2][]const u8, comptime sep: []const u8) Spelling {
+     };
+ }
+ 
+-/// Existing tool_calls and spaced calls, followed by the structural grammar's function_calls envelope.
+-pub const spellings = [_]Spelling{ spelled(reply_text.calls[2], ""), spelled(reply_text.calls[4], " "), grammarSpelling() };
++fn newlineCalls() Spelling {
++    return spelled(reply_text.calls[6], " ");
++}
++
++/// Existing tool_calls and spaced calls, the structural grammar's function_calls envelope, then the
++/// spaced block that the model prefixes with two newlines (calls[6]; indices 2, 4 and 5 stay put).
++pub const spellings = [_]Spelling{ spelled(reply_text.calls[2], ""), spelled(reply_text.calls[4], " "), grammarSpelling(), newlineCalls() };
+ 
+ /// xgrammar deepseek_v4_1_xml writes spaced parameter tags inside the canonical unspaced invokes.
+ fn grammarSpelling() Spelling {
+@@ -43,7 +48,11 @@ fn grammarSpelling() Spelling {
+ }
+ 
+ /// The longest opener: a search resumed this far back finds one the last search saw only part of.
+-pub const open_max = @max(@max(spellings[0].open.len, spellings[1].open.len), spellings[2].open.len);
++pub const open_max = blk: {
++    var m: usize = 0;
++    for (spellings) |sp| m = @max(m, sp.open.len);
++    break :blk m;
++};
+ 
+ pub const Opener = struct { at: usize, spelling: *const Spelling };
+ 
+@@ -56,9 +65,12 @@ pub fn findOpen(text: []const u8, from: usize) ?Opener {
+     return first;
+ }
+ 
+-/// Where the block ``o`` opens ends, past its own spelling's closer; null while it is not closed.
++/// Where the block ``o`` opens ends, past its closer. A closer inside a DSML parameter value does not end it.
++/// Null while the block may still be being written.
+ pub fn blockEnd(text: []const u8, o: Opener) ?usize {
+-    return (find(text, o.spelling.close, o.at + o.spelling.open.len) orelse return null) + o.spelling.close.len;
++    const from = o.at + o.spelling.open.len;
++    const at = reply_text.blockEnd(text, from, o.spelling.open, o.spelling.close, false) orelse return null;
++    return at + o.spelling.close.len;
+ }
+ 
+ /// The spelling whose block opener ``text`` starts with.
+diff --git a/zig/src/server/tool_parse.zig b/zig/src/server/tool_parse.zig
+index 401b75e..d944a69 100644
+--- a/zig/src/server/tool_parse.zig
++++ b/zig/src/server/tool_parse.zig
+@@ -44,7 +44,8 @@ fn allSpace(s: []const u8) bool {
+ }
+ 
+ /// (start, end, payload) of each tool-call block in order; a block inside an earlier one is part of it.
+-fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
++/// ``extend`` reads a DSML block past a closer that sits inside a parameter value.
++fn envelopes(a: Allocator, text: []const u8, extend: bool) Allocator.Error![]Envelope {
+     var found: std.ArrayList(Envelope) = .empty;
+     var pos: usize = 0;
+     var dsml = tool_dsml.findOpen(text, 0); // the DSML opener at or after `pos`, searched again only once `pos` passes it
+@@ -80,7 +81,12 @@ fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
+     }
+     pos = 0;
+     while (tool_dsml.findOpen(text, pos)) |o| {
+-        const e = tool_dsml.blockEnd(text, o);
++        const from = o.at + o.spelling.open.len;
++        const at = if (extend)
++            reply_text.blockEnd(text, from, o.spelling.open, o.spelling.close, true)
++        else
++            std.mem.indexOfPos(u8, text, from, o.spelling.close);
++        const e = if (at) |i| i + o.spelling.close.len else null;
+         const end = e orelse text.len;
+         try found.append(a, .{ .start = o.at, .end = end, .payload = text[o.at..end], .complete = e != null });
+         pos = end;
+@@ -107,7 +113,23 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
+     }
+     if (try bareCalls(a, text, &known, max_calls)) |calls| return .{ .content = "", .calls = calls };
+     const schemas = try tool_params.schemas(a, tools);
+-    const envs = try envelopes(a, text);
++    const first = try envelopes(a, text, false);
++    const cut = try readEnvelopes(a, text, first, &schemas, &known, max_calls);
++    const longer = try envelopes(a, text, true);
++    if (sameSpans(first, longer)) return cut;
++    const read = try readEnvelopes(a, text, longer, &schemas, &known, max_calls);
++    const n_read = if (read.calls) |c| c.len else 0;
++    const n_cut = if (cut.calls) |c| c.len else 0;
++    return if (n_read > n_cut) read else cut;
++}
++
++fn sameSpans(a: []const Envelope, b: []const Envelope) bool {
++    if (a.len != b.len) return false;
++    for (a, b) |x, y| if (x.start != y.start or x.end != y.end) return false;
++    return true;
++}
++
++fn readEnvelopes(a: Allocator, text: []const u8, envs: []const Envelope, schemas: *const tool_params.Schemas, known: *const std.StringArrayHashMapUnmanaged([]const u8), max_calls: ?usize) Allocator.Error!Parsed {
+     if (envs.len == 0) return .{ .content = text, .calls = null };
+     var calls: std.ArrayList(Value) = .empty;
+     var residue: std.ArrayList(u8) = .empty;
+@@ -128,7 +150,7 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
+                     error.Invalid => null,
+                 };
+             }
+-            const one = payload(a, env.payload, &schemas, max_calls != null) catch |e| switch (e) {
++            const one = payload(a, env.payload, schemas, max_calls != null) catch |e| switch (e) {
+                 error.OutOfMemory => return error.OutOfMemory,
+                 error.Invalid => break :blk null,
+             };
+@@ -140,7 +162,7 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
+             break :blk null;
+         };
+         const good = if (parsed) |list| list.len > 0 and for (list) |c| {
+-            if ((try callName(a, c, &known)) == null) break false;
++            if ((try callName(a, c, known)) == null) break false;
+         } else true else false;
+         if (!good) {
+             try residue.appendSlice(a, text[env.start..env.end]);
+@@ -148,7 +170,7 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
+             continue;
+         }
+         for (parsed.?) |c| {
+-            if (max_calls == null or calls.items.len < max_calls.?) try calls.append(a, try openaiCall(a, (try callName(a, c, &known)).?, c.arguments));
++            if (max_calls == null or calls.items.len < max_calls.?) try calls.append(a, try openaiCall(a, (try callName(a, c, known)).?, c.arguments));
+         }
+     }
+     try residue.appendSlice(a, text[cursor..]);
+@@ -545,3 +567,23 @@ pub fn putBack(a: Allocator, text: []const u8, quoted: []const []const u8) Alloc
+     try out.appendSlice(a, text[cursor..]);
+     return out.items;
+ }
++
++test "a DSML parameter value may contain the block closer" {
++    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"properties\":{\"n\":{\"type\":\"string\"}}}}}]")).ok.array;
++    const D = "\u{ff5c}DSML\u{ff5c}";
++    const close = "</" ++ D ++ " calls>";
++    const text = "note\n\n<" ++ D ++ " calls>\n<" ++ D ++ " invoke name=\"lookup\">\n<" ++ D ++ " parameter name=\"n\" string=\"true\">see " ++ close ++ " inside</" ++ D ++ " parameter>\n</" ++ D ++ " invoke>\n" ++ close;
++    const r = try parse(a, text, tools, null);
++    try std.testing.expectEqualStrings("note", r.content);
++    const args = r.calls.?[0].get("function").?.get("arguments").?.string;
++    try std.testing.expect(std.mem.indexOf(u8, args, close) != null);
++}
++
++test "a DSML payload shorter than its opener and closer is not a call" {
++    const D = "\u{ff5c}DSML\u{ff5c}";
++    try std.testing.expect(tool_dsml.whole("<" ++ D ++ " calls>") == null);
++    try std.testing.expect(tool_dsml.whole("</" ++ D ++ " calls>") == null);
++}

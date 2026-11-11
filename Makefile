@@ -10,7 +10,7 @@ help:
 	@echo "make check                 validate profiles, syntax, shell scripts (CI runs this)"
 	@echo "make triage                re-run the 53-patch triage against TF_TAG (default v1.2.7)"
 	@echo "make profile NAME=ttft-fill write scripts/local.sh from profiles/<name>.env"
-	@echo "make plan FREE=6.5         KV pool budget; 9 is an unmeasured assumption"
+	@echo "make plan FREE=6.97        Nov 11 SparkOne MemAvailable; do not spend it on POOL"
 	@echo "make ttft OUT=runs/a.json  TTFT on the trial (port 8890; refuses 8888/18004)"
 	@echo "make bench OUT=runs/b.json prefill+decode on the trial (same refusal)"
 	@echo "scripts/trial.sh restart   start the trial container, not the live serve"
@@ -27,6 +27,13 @@ check:
 	@bash -n scripts/trial-guard.sh && echo "bash OK: scripts/trial-guard.sh"
 	@bash -n scripts/trial.sh && echo "bash OK: scripts/trial.sh"
 	@bash -n scripts/trial-env.sh && echo "bash OK: scripts/trial-env.sh"
+	@bash -n scripts/gate.sh && echo "bash OK: scripts/gate.sh"
+	@bash -n scripts/engine-trial.sh && echo "bash OK: scripts/engine-trial.sh"
+	@bash -n scripts/fetch-engine.sh && echo "bash OK: scripts/fetch-engine.sh"
+	@bash -n scripts/prepare-assets.sh && echo "bash OK: scripts/prepare-assets.sh"
+	@bash -n scripts/build-image.sh && echo "bash OK: scripts/build-image.sh"
+	@bash -n scripts/port-hash.sh && echo "bash OK: scripts/port-hash.sh"
+	@scripts/gate.sh --self-check
 	@python3 -m py_compile tools/endpoint_guard.py tools/bench.py && echo "python OK: tools/endpoint_guard.py tools/bench.py"
 	@scripts/check-profiles.sh
 	@python3 -I scripts/test_trial_guards.py
@@ -54,4 +61,4 @@ profile:
 	@scripts/profile.sh $(NAME) $(FORCE)
 
 plan:
-	@scripts/memory-plan.sh $(or $(FREE),9)
+	@scripts/memory-plan.sh $(or $(FREE),6.97)

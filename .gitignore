@@ -2,6 +2,7 @@
 recipe-tf-fbbc971/scripts/local.sh
 recipe-tf-fbbc971/.env
 runs/*.json
+engine/src/
 
 # python
 __pycache__/

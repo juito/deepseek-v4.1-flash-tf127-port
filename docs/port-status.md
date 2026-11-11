@@ -1,8 +1,9 @@
 # Port status: DeepSeek-V4.1-Flash-1017 onto TensorFold v1.2.7
 
-**Status: not deployable.** This repository is the triage and scaffolding for moving the
-2x DGX Spark recipe from BertholomusAI's fork to upstream TensorFold v1.2.7. Nothing here
-builds, serves, or has been measured. Do not point `start.sh` at it.
+**Status: not measured on GB10.** The tree has a v1.2.7 overlay (`engine/patches/`),
+trial profiles, and a Spark build path. This VM has no GB10, so nothing here has served
+a token. `scripts/trial.sh` still starts the current recipe pin. The v1.2.7 container is
+`scripts/engine-trial.sh`. Do not point either at the live serve.
 
 ## Verified baseline
 
@@ -176,20 +177,86 @@ Metal/HIP work. The DeepSeek-V4.1 entries are correctness and tooling:
 - 1.2.7: `tp.device` runs TP ranks as threads and checks DeepSeek-V4.1 exchanges bit-for-bit at
   worlds 1–4; serving still refuses 3 ranks — `#2491`
 
-So the port buys maintainability and a correctness fix, not tokens per second. Any decode gain
-has to come from re-landing the family-side patches (`0033` graph cap, `0050` draft
-calibration, `0051` prompt rows, `0017` 32-row kit split, `0066` load prefetch) on the new
-engine — and each of those has to be measured, not assumed.
+The Nov 11 TTFT plan is session replay on local NVMe with a resident cap, which is already
+in v1.2.7 (`#2182`). It is not a requantize, and it is not a re-land of the family kernel
+patches. Those stay dropped until a GB10 measurement says a specific one is worth the bit
+risk. `docs/patch-map.csv` is the disposition of all 53. `triage.csv` stays the mechanical
+`git apply` result (1 applies). The overlay includes the 0029 budget default, so
+`scripts/fetch-engine.sh` applies only `engine/patches/` and does not also apply 0029.
+
+## Nov 11 spare RAM (live Sparks, ~2 PM PST)
+
+| | SparkOne | SparkTwo |
+|---|---|---|
+| `MemAvailable` | 6.96–6.98 GiB | 8.59 GiB |
+| Truly free | 1.23 GiB | (the rest of SparkOne's available figure is Engram page cache and margin) |
+| Headroom | about 2–3 GiB | higher than SparkOne; the pair is limited by SparkOne |
+
+Memguard still kills at 2.5 GiB for 4 s, hard floor 1 GiB. `TENSORFOLD_MEMORY_RESERVE_GIB`
+stays at the engine's own reserve. On unified memory that default is `max(4 GiB, total/10)`,
+about 12.8 GiB on a 128 GiB Spark. A profile that sets the variable below 12.2 is refused.
+Setting it to 12.2 would lower the default, so the profiles omit it.
+
+`CONTEXT` stays 524288 in every profile. A 464K-token turn was killed at 655360. Never
+1048576. The v1.2.7 slot default is 4096, so the profiles also set `TF_DSV41_CONTEXT=524288`.
+
+The live prompt cache was full: 512 MiB, 121 evictions, 95.2% prefix hit rate, average TTFT
+1.77 s. `tf127-baseline.env` uses prefill `full` and a 0.5 GiB resident cap so the comparison
+matches that shape. The main trial is `tf127-replay.env`: `TF_DSV41_PREFILL=replay`,
+`TF_DSV41_SESSION_DISK` on local NVMe, `TF_DSV41_SESSION_DISK_GIB=64`,
+`TF_DSV41_SESSION_RESIDENT_GIB=3` on both ranks. Unset residency is unlimited
+(`sessions_gpu.zig`). A mismatch refuses both ranks (`session_budget.zig`). If the
+`MemAvailable` trough is under 4 GiB, use `tf127-replay-2gib.env`.
+
+Weights stay EAQ v1 @ `45ee5d0f` (KL 0.0137, top-1 96.6%). v1.2.7 has no mixed-pack loader.
+`EAQ_V1_1` and `ABLIT` are refused by `scripts/check-profiles.sh`.
+
+`TF_DSV41_PF_4K=1` needs `TF_DSV41_PF_4K_MEMORY_OK=1`, `TF_DSV41_GM_V2=1` (or `split`), and
+`TF_DSV41_PREFILL=replay`. Upstream's own warning is about 0.66 GiB more worker memory.
+`TF_DSV41_PREFETCH_AHEAD=1` is the other optional knob. Both are separate profiles and need
+token equality against replay. `#2182` reports a 319K restore in 1.2–1.4 s against 155–178 s,
+replies byte-identical. That is upstream's measurement.
+
+## What was checked here
+
+Env names were read from the v1.2.7 tree at `93a2e93ece` before they were written into
+profiles: `TF_DSV41_PREFILL`, `TF_DSV41_SESSION_DISK`, `TF_DSV41_SESSION_DISK_GIB`,
+`TF_DSV41_SESSION_RESIDENT_GIB`, `TF_DSV41_PF_4K`, `TF_DSV41_PF_4K_MEMORY_OK`,
+`TF_DSV41_GM_V2` (`0`, `1`, `split`), `TF_DSV41_PREFETCH_AHEAD`, `TF_DSV41_PREFILL_PIECES`,
+`TF_DSV41_OWN_PREFILL`, `TF_DSV41_PROMPT_TAIL`, `TF_DSV41_BATCH_SHORT`,
+`TF_DSV41_CONTEXT`, `TENSORFOLD_MEMORY_RESERVE_GIB`. `TF_DSV41_PREFILL_CUT_IN` and
+`TF_DSV41_PREFILL_INTERLEAVE_MS` are new names in the overlay (`kv/sched.zig`); they are
+not upstream 1.2.7 names.
+
+The overlay is `engine/patches/0001-server-dsml-anthropic-and-prefill-cut-in.patch`.
+`git apply --check` accepts it on a clean v1.2.7 tree at `93a2e93ece`. It ports the
+newline DSML opener, a value that contains its block closer, the orphan-closer diagnostic,
+empty `reasoning_content` falling through to a non-empty `reasoning` (an empty string with
+no alternate is still stored, so the template goldens keep `<think></think>`), Anthropic
+`clear_thinking_*` edits, a system turn anywhere in `messages`, and the thinking budget
+default.
+
+Host tests on this x86_64 VM, Zig 0.17.0, against the patched tree (not a GB10 binary):
+
+| step | result |
+| --- | --- |
+| `zig build test-tool-parse-host` | 56/56 pass, including the newline hide and a closer inside a parameter value |
+| `zig build test-dsv41-serve-host` | 15 pass, 5 skip; template goldens match, including the empty-`reasoning_content` fallthrough |
+| `zig build test-dsv41-kv` | 31/31 pass, including short-prompt cut-in and `TF_DSV41_PREFILL_INTERLEAVE_MS` |
+| server module, filter `output diagnostic` plus the thinking-tail filter | 37/37 pass |
+
+The Anthropic budget and `clear_thinking_*` edits typecheck because that server module
+compiles `chat_generation.zig`, which imports `anthropic_translate.zig`. This run did not
+execute a dedicated test of those two branches. `make check` passes: profile rules, trial
+guards, and `scripts/gate.sh --self-check`. No image was built here (no aarch64, no nvcc,
+no GB10). Serving speed is not measured.
 
 ## Validation gate
 
-A port is only acceptable when all of these pass on the pair:
-
-1. `zig build dsv41-test` and the engine host tests (no GPU needed).
-2. `tools/exact.py` — 31 recorded token-hash cases identical to the current image.
-3. `tools/smoke.py`, `tools/prompt_reuse.py`, `tools/toolcheck.py`, `tools/needle.py`.
-4. `tools/bench.py` with `--compare old.json new.json` for prefill, decode, multi-stream.
-5. One trial start after the side image is built, watching `memguard`, then rollback to the
-   untouched live container. The commands and the expected timings are
-   [`trial-runbook.md`](trial-runbook.md). Do not point the recipe's `start.sh` at the live
-   container name, the live tag, or port 8888.
+`scripts/gate.sh` is what the owner runs on SparkOne. It aborts if `MemAvailable` is under
+3.5 GiB on either node. A pass needs `exact.py` 31/31 against the live record, cold TTFT
+under the Nov 11 refs (8k 13.80 s, 131k 57.89 s), warm below cold at 8k/32k/131k, a
+restart-then-restore of the 8k prompt faster than that cold number, a recorded short
+request during a long prefill, and 4-stream decode at least 95% of 102.7 tok/s.
+`tf127-pf4k` and `tf127-prefetch` also need `--token-baseline` from a replay run.
+Commands and rollback are in [`trial-runbook.md`](trial-runbook.md).

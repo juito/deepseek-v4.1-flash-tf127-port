@@ -1,0 +1,26 @@
+# aarch64 GB10 image for the v1.2.7 trial. Build on a Spark (sm_121, CUDA 13).
+# scripts/build-image.sh is the entry point. It refuses the live tag.
+FROM nvcr.io/nvidia/pytorch:26.07-py3
+
+ARG ZIG_VERSION=0.17.0
+ARG ZIG_SHA256=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
+ && curl -fsSL -o /tmp/zig.tar.xz "https://ziglang.org/download/${ZIG_VERSION}/zig-aarch64-linux-${ZIG_VERSION}.tar.xz" \
+ && echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c - \
+ && tar -C /opt -xJf /tmp/zig.tar.xz \
+ && ln -sf "/opt/zig-aarch64-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig \
+ && rm -rf /var/lib/apt/lists/* /tmp/zig.tar.xz
+
+WORKDIR /src
+COPY engine/src /src
+RUN zig build dsv41-serve -Doptimize=ReleaseSafe \
+      -Dnvcc=/usr/local/cuda/bin/nvcc \
+      -Ddsv41-nvcc=/usr/local/cuda/bin/nvcc \
+      -Dsm=121 \
+ && zig build dsv41-assets -Doptimize=ReleaseSafe
+
+ENV PATH="/src/zig-out/bin:${PATH}"
+# The launcher passes --host and --port. This image does not bind 0.0.0.0.
+ENTRYPOINT ["tensorfold-dsv41"]

@@ -1,11 +1,12 @@
 # The RAM left on each Spark: what it can and cannot buy
 
-**9 GiB free is an assumption. It has not been measured by this repository.** The recipe's own
-numbers, on a headless head after the weights are loaded, are about **6.2–6.5 GiB
-`MemAvailable`** (`docs/memory-and-safety.md`: 6.2–6.3 GiB idle at `POOL=2097152`; the
-changelog's resume note: 6.5 GiB after the load, 4.9 GiB at 159K tokens, 4.2 GiB at 261K).
-`scripts/memory-plan.sh` with no argument still prints a table for 9 and says so on stderr.
-Pass the GiB you read.
+**Measured Nov 11 ~2 PM PST on the live Sparks.** SparkOne `MemAvailable` was **6.96–6.98 GiB**,
+of which **1.23 GiB was truly free**; the rest was Engram page cache and margin. Headroom on
+that node is about **2–3 GiB**. SparkTwo `MemAvailable` was **8.59 GiB**. The pair is limited
+by SparkOne. Memguard still kills at 2.5 GiB for 4 s (hard 1 GiB).
+
+The recipe's older notes (6.2–6.5 GiB after load, and an unmeasured 9 GiB assumption) are
+historical. `scripts/memory-plan.sh` now defaults to 6.97 and tells you to leave `POOL` unset.
 
 Short answer, at whatever that number is: **spare RAM cannot buy bits, and it cannot raise
 decode tok/s.** What it can buy is residency — more kept conversations staying in the pool —
@@ -95,17 +96,15 @@ free, subtract 2.5 from every headroom number.
 | 6,291,456 | ~6.0 | ~3.3 | ~3.0 | tight; memguard territory |
 | 8,388,608 | ~8.0 | ~4.4 | ~1.0 | below the memguard floor — do not |
 
-**Recommendation: `POOL=2097152` with `KV_SHARD=0`.** It is the documented four-stream case and
-costs ~2 GiB a rank. At the recipe's ~6.5 GiB after load that leaves about 4.5 GiB of headroom,
-not the ~7 GiB you get only if 9 GiB free is real. It still avoids KV sharding's 1–4% decode
-penalty. Do not turn sharding on to "spend" an unmeasured 9 GiB.
+**Recommendation for the v1.2.7 trial: leave `POOL` unset.** SparkOne's 2–3 GiB of headroom
+is the Engram page cache plus a thin margin. Spending it on a 2,097,152-position pool takes
+that cache. Cap `TF_DSV41_SESSION_RESIDENT_GIB` at 3 on both ranks, or 2 when the
+`MemAvailable` trough is under 4 GiB. The old table above is the pool math for a number you
+pass in; it is not the trial budget.
 
-Go to `POOL=4194304` only if you routinely hold more than four long conversations **and** the
-GiB you measured still clears the reserve. At 6.5 GiB free that pool is already over the
-script's budget. Beyond ~4M the typical working set is already resident, and every extra GiB
-is headroom you gave away.
-
-Use `scripts/memory-plan.sh <GiB>` with the number you read off the Spark.
+The live prompt cache on Nov 11 was full: 512 MiB, 121 evictions, 95.2% prefix hit rate,
+average TTFT 1.77 s. `profiles/tf127-baseline.env` puts the fair comparison at prefill `full`
+and a 0.5 GiB resident cap. The TTFT profile is `profiles/tf127-replay.env`.
 
 ## The rest of the free RAM: leave it alone
 

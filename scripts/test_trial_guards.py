@@ -177,6 +177,32 @@ def main() -> int:
         if path.name == "ttft-interleave.env":
             check(assigned.get("PREFILL_INTERLEAVE_MS") == "250", "ttft-interleave sets 250 ms")
             check("TF_FILL_CHUNKS" not in assigned, "ttft-interleave does not set TF_FILL_CHUNKS")
+        if path.name.startswith("tf127-"):
+            check(assigned.get("PARALLEL") == "4", f"{path.name} PARALLEL=4")
+            check(ctx == MAX_CONTEXT, f"{path.name} CONTEXT is 524288")
+            check("POOL" not in assigned, f"{path.name} does not raise POOL")
+            check("TENSORFOLD_MEMORY_RESERVE_GIB" not in assigned, f"{path.name} does not lower the reserve")
+            check(assigned.get("TF_DSV41_CONTEXT") == "524288", f"{path.name} sets the engine context")
+            resident = float(assigned["TF_DSV41_SESSION_RESIDENT_GIB"])
+            check(0 < resident <= 3, f"{path.name} resident cap is {resident}")
+            check("EAQ_V1_1" not in assigned and "ABLIT" not in assigned, f"{path.name} stays on EAQ v1")
+        if path.name == "tf127-baseline.env":
+            check(assigned.get("TF_DSV41_PREFILL") == "full", "baseline prefill is full")
+            check(assigned.get("TF_DSV41_SESSION_RESIDENT_GIB") == "0.5", "baseline residency is 0.5 GiB")
+        if path.name == "tf127-replay.env":
+            check(assigned.get("TF_DSV41_PREFILL") == "replay", "replay prefill")
+            check(assigned.get("TF_DSV41_SESSION_RESIDENT_GIB") == "3", "replay resident cap is 3 GiB")
+            check(assigned.get("TF_DSV41_SESSION_DISK_GIB") == "64", "replay disk budget is 64 GiB")
+            check(bool(assigned.get("TF_DSV41_SESSION_DISK")), "replay names a session disk")
+        if path.name == "tf127-replay-2gib.env":
+            check(assigned.get("TF_DSV41_SESSION_RESIDENT_GIB") == "2", "fallback resident cap is 2 GiB")
+        if path.name == "tf127-pf4k.env":
+            check(assigned.get("TF_DSV41_PF_4K") == "1", "pf4k enables the knob")
+            check(assigned.get("TF_DSV41_PF_4K_MEMORY_OK") == "1", "pf4k acknowledges the extra memory")
+            check(assigned.get("TF_DSV41_GM_V2") == "1", "pf4k sets GM_V2")
+            check(assigned.get("TF_DSV41_PREFILL") == "replay", "pf4k requires replay")
+        if path.name == "tf127-prefetch.env":
+            check(assigned.get("TF_DSV41_PREFETCH_AHEAD") == "1", "prefetch is its own profile")
 
     proc = subprocess.run(["bash", str(ROOT / "scripts" / "check-profiles.sh")],
                           cwd=ROOT, text=True, capture_output=True, check=False)
@@ -198,14 +224,46 @@ def main() -> int:
                               cwd=ROOT, text=True, capture_output=True, check=False)
         check(proc.returncode != 0 and "mutually exclusive" in proc.stderr,
               "fill chunks plus interleave are refused")
+        both.unlink()
+        both.write_text(
+            "CONTEXT=524288\nPARALLEL=4\nTF_DSV41_CONTEXT=524288\n"
+            "TENSORFOLD_MEMORY_RESERVE_GIB=10\nTF_DSV41_SESSION_RESIDENT_GIB=0.5\n"
+            "TF_DSV41_PREFILL=full\n",
+            encoding="utf-8",
+        )
+        # The reserve check is not filename-gated. A tf127 name also needs the rest of the shape.
+        reserve = ROOT / "profiles" / "_bad_reserve.env"
+        reserve.write_text(both.read_text(encoding="utf-8"), encoding="utf-8")
+        proc = subprocess.run(["bash", str(ROOT / "scripts" / "check-profiles.sh")],
+                              cwd=ROOT, text=True, capture_output=True, check=False)
+        check(proc.returncode != 0 and "12.2" in proc.stderr, "a reserve below 12.2 is refused")
+        reserve.unlink()
+        unlimited = ROOT / "profiles" / "tf127-_bad_unlimited.env"
+        unlimited.write_text(
+            "CONTEXT=524288\nPARALLEL=4\nTF_DSV41_CONTEXT=524288\n"
+            "TF_DSV41_PREFILL=replay\nTF_DSV41_SESSION_DISK=/nvme/dsv41-sessions\n"
+            "TF_DSV41_SESSION_DISK_GIB=64\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run(["bash", str(ROOT / "scripts" / "check-profiles.sh")],
+                              cwd=ROOT, text=True, capture_output=True, check=False)
+        check(proc.returncode != 0 and "unlimited" in proc.stderr, "replay without a resident cap is refused")
+        unlimited.unlink()
     finally:
         bad.unlink(missing_ok=True)
         both.unlink(missing_ok=True)
+        (ROOT / "profiles" / "_bad_reserve.env").unlink(missing_ok=True)
+        (ROOT / "profiles" / "tf127-_bad_unlimited.env").unlink(missing_ok=True)
 
     for rel in ("scripts/trial.sh", "scripts/trial-guard.sh", "scripts/trial-env.sh", "scripts/profile.sh"):
         code = uncommented(ROOT / rel)
         check("docker rm" not in code, f"{rel} never calls docker rm")
         check("docker tag" not in code, f"{rel} never calls docker tag")
+    engine = uncommented(ROOT / "scripts" / "engine-trial.sh")
+    check('docker rm -f "$TRIAL_CONTAINER"' in engine, "engine-trial removes only the trial container")
+    check("docker rm" not in engine.replace('docker rm -f "$TRIAL_CONTAINER"', ""),
+          "engine-trial has no other docker rm")
+    check("LIVE_CONTAINER" in engine, "engine-trial refuses the live container by the guard's name")
     # HOST default in the guard source is 127.0.0.1, and 0.0.0.0 only appears as a refusal.
     guard = (ROOT / "scripts" / "trial-guard.sh").read_text(encoding="utf-8")
     check('printf \'%s\\n\' "127.0.0.1"' in guard, "default host is 127.0.0.1")
