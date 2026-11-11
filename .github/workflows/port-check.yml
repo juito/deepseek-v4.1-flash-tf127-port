@@ -16,6 +16,15 @@ on:
         default: "v1.2.7"
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate profiles, scripts and tooling
+        run: make check
+
   triage:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -24,7 +33,7 @@ jobs:
 
       - name: Triage the patch series
         env:
-          TF_TAG: ${{ inputs.tf_tag || 'v1.2.7' }}
+          TF_TAG: ${{ github.event.inputs.tf_tag || 'v1.2.7' }}
         run: |
           chmod +x scripts/triage.sh
           scripts/triage.sh
@@ -35,7 +44,7 @@ jobs:
           applies=$(grep -c ',APPLIES,' triage.csv || true)
           blocked=$(grep -c ',BLOCKED,' triage.csv || true)
           {
-            echo "### Patch triage against \`${{ inputs.tf_tag || 'v1.2.7' }}\`"
+            echo "### Patch triage against \`${{ github.event.inputs.tf_tag || 'v1.2.7' }}\`"
             echo ""
             echo "| patches | applying | blocked |"
             echo "|---|---|---|"

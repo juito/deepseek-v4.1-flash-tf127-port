@@ -1,0 +1,8 @@
+# local settings and measurement output never belong in the repo
+recipe-tf-fbbc971/scripts/local.sh
+recipe-tf-fbbc971/.env
+runs/*.json
+
+# python
+__pycache__/
+*.pyc
