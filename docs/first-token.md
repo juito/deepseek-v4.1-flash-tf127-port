@@ -43,7 +43,7 @@ v1.2.7 profiles use different names, checked against tag `v1.2.7` (`93a2e93ece`)
 
 | Profile | What it sets |
 |---|---|
-| `tf127-baseline.env` | `PARALLEL=4`, `TF_DSV41_PREFILL=full`, resident cap 0.5 GiB. Fair match to the live shape. The live prompt cache was 512 MiB, 121 evictions, 95.2% prefix hits, average TTFT 1.77 s |
+| `tf127-baseline.env` | `PARALLEL=4` and `TF_DSV41_SLOTS=4`, pool `1048576`, slot drafts and session slots on, `TF_DSV41_PREFILL=full`, resident cap 0.5 GiB. Fair match to the live shape: four agents, and the live prompt cache was 512 MiB, 121 evictions, 95.2% prefix hits, average TTFT 1.77 s |
 | `tf127-replay.env` | `TF_DSV41_PREFILL=replay`, session disk on local NVMe, disk budget 64 GiB, resident cap **3 GiB on both ranks**. This is the TTFT trial. Upstream `#2182`: a 319K restore in 1.2–1.4 s against 155–178 s cold. That number is upstream's |
 | `tf127-replay-2gib.env` | The same with the cap at 2 GiB, for a `MemAvailable` trough under 4 GiB |
 | `tf127-pf4k.env` | Optional. `TF_DSV41_PF_4K=1` plus the memory acknowledgement, `TF_DSV41_GM_V2=1`, and replay. About **+0.66 GiB**. Token equality against replay before you keep it |
@@ -52,9 +52,11 @@ v1.2.7 profiles use different names, checked against tag `v1.2.7` (`93a2e93ece`)
 | `tf127-interleave.env` | The same pieces with `TF_DSV41_PREFILL_INTERLEAVE_MS=250` |
 
 SparkOne's headroom is about 2–3 GiB (`MemAvailable` 6.96–6.98 GiB, 1.23 GiB truly free).
-SparkTwo was 8.59 GiB. Do not lower the 12.2 GiB engine reserve. Do not raise `POOL`.
+SparkTwo was 8.59 GiB. Do not lower the 12.2 GiB engine reserve. The pool stays at the
+live **1,048,576** positions. Do not raise it to 2,097,152.
 `CONTEXT` stays 524288. Live cold refs for the gate: 8k **13.80 s**, 131k **57.89 s**.
-4-stream decode that day was **102.7 tok/s**.
+Four agents that day decoded at **102.7 tok/s** aggregate. A pass needs those four to
+overlap, not merely to queue.
 
 ## What not to do
 

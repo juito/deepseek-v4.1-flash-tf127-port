@@ -6,7 +6,9 @@ that node is about **2–3 GiB**. SparkTwo `MemAvailable` was **8.59 GiB**. The 
 by SparkOne. Memguard still kills at 2.5 GiB for 4 s (hard 1 GiB).
 
 The recipe's older notes (6.2–6.5 GiB after load, and an unmeasured 9 GiB assumption) are
-historical. `scripts/memory-plan.sh` now defaults to 6.97 and tells you to leave `POOL` unset.
+historical. `scripts/memory-plan.sh` now defaults to 6.97. The v1.2.7 trial keeps the live
+1,048,576-position pool, because four engine slots and the session store need it, and
+does not raise that pool to 2,097,152.
 
 Short answer, at whatever that number is: **spare RAM cannot buy bits, and it cannot raise
 decode tok/s.** What it can buy is residency — more kept conversations staying in the pool —
@@ -96,11 +98,13 @@ free, subtract 2.5 from every headroom number.
 | 6,291,456 | ~6.0 | ~3.3 | ~3.0 | tight; memguard territory |
 | 8,388,608 | ~8.0 | ~4.4 | ~1.0 | below the memguard floor — do not |
 
-**Recommendation for the v1.2.7 trial: leave `POOL` unset.** SparkOne's 2–3 GiB of headroom
-is the Engram page cache plus a thin margin. Spending it on a 2,097,152-position pool takes
-that cache. Cap `TF_DSV41_SESSION_RESIDENT_GIB` at 3 on both ranks, or 2 when the
-`MemAvailable` trough is under 4 GiB. The old table above is the pool math for a number you
-pass in; it is not the trial budget.
+**Recommendation for the v1.2.7 trial: `POOL=1048576` and `TF_DSV41_SLOTS=4`.** That 1M
+pool is the one the live serve already runs, so it is already inside the Nov 11
+`MemAvailable` reading. Four engine slots and the session store need it (`RowsNeedPool`
+without a pool, and sessions stay off). Do not raise it to 2,097,152: that is the spend
+that takes SparkOne's Engram page cache. Cap `TF_DSV41_SESSION_RESIDENT_GIB` at 3 on both
+ranks, or 2 when the `MemAvailable` trough is under 4 GiB. The old table above is the pool
+math for a number you pass in; the trial does not follow its 2M row.
 
 The live prompt cache on Nov 11 was full: 512 MiB, 121 evictions, 95.2% prefix hit rate,
 average TTFT 1.77 s. `profiles/tf127-baseline.env` puts the fair comparison at prefill `full`

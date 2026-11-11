@@ -53,7 +53,7 @@ the behavior matches:
 |---|---|---|
 | `TF_FILL_CHUNKS`, `TF_FILL_CUT_IN`, `TF_FILL_ROUNDS`, `TF_FILL_FIRST` | absent (no `TF_FILL_` at all) | `TF_DSV41_PREFILL_PIECES` is a host piece planner; `TF_DSV41_PREFILL_CHUNK` / `TF_DSV41_PREFILL_ROWS` size a segment. Not the cut-in switch |
 | `TF_DS_PREFILL_INTERLEAVE_MS` | absent | no interleave millisecond switch found |
-| `TF_DS_POOL` | absent | `TF_DSV41_POOL_TOKENS` (paged pool; unset means no pool) |
+| `TF_DS_POOL` | absent | `TF_DSV41_POOL_TOKENS` (paged pool; unset means no pool, and then slots stay at 1 and sessions stay off) |
 | `TF_DS_WINDOW` | absent | `TF_DSV41_CONTEXT` (slot positions) |
 | `TF_DS_GRAPH_CAP` | absent | `TF_DSV41_GRAPHS_MAX` |
 | `TF_DS_KV_SHARD` | absent | `TF_DSV41_KV_SPLIT` |
@@ -208,6 +208,18 @@ matches that shape. The main trial is `tf127-replay.env`: `TF_DSV41_PREFILL=repl
 (`sessions_gpu.zig`). A mismatch refuses both ranks (`session_budget.zig`). If the
 `MemAvailable` trough is under 4 GiB, use `tf127-replay-2gib.env`.
 
+Four agents is a separate requirement from TTFT. `--parallel 4` is only the HTTP cap.
+`cuda_model.Options` has no `lanes` field, and `LaneHost` is opened with
+`lanes = TF_DSV41_SLOTS` (default 1). A second request then hits `TooManySlots` or waits.
+Every v1.2.7 profile therefore sets `TF_DSV41_SLOTS=4`, `TF_DSV41_SLOT_DRAFTS=1` (DSpark
+on every slot), and `TF_DSV41_SESSION_SLOTS=1` (the store turns off above one slot without
+it; upstream notes that path has not been checked on hardware). Slots above 1 need the
+paged pool (`RowsNeedPool` / `SlotsNeedPool`). The profiles set `TF_DSV41_POOL_TOKENS=1048576`,
+the live 1M pool already inside the Nov 11 `MemAvailable` reading. They do not raise it to
+2,097,152. `scripts/gate.sh` aborts unless `tensorfold:lanes` is 4, and a pass needs all
+four decode streams to finish with the aggregate above the fastest stream and within 5% of
+102.7 tok/s.
+
 Weights stay EAQ v1 @ `45ee5d0f` (KL 0.0137, top-1 96.6%). v1.2.7 has no mixed-pack loader.
 `EAQ_V1_1` and `ABLIT` are refused by `scripts/check-profiles.sh`.
 
@@ -254,9 +266,10 @@ no GB10). Serving speed is not measured.
 ## Validation gate
 
 `scripts/gate.sh` is what the owner runs on SparkOne. It aborts if `MemAvailable` is under
-3.5 GiB on either node. A pass needs `exact.py` 31/31 against the live record, cold TTFT
-under the Nov 11 refs (8k 13.80 s, 131k 57.89 s), warm below cold at 8k/32k/131k, a
-restart-then-restore of the 8k prompt faster than that cold number, a recorded short
-request during a long prefill, and 4-stream decode at least 95% of 102.7 tok/s.
+3.5 GiB on either node, or if `tensorfold:lanes` is not 4. A pass needs `exact.py` 31/31
+against the live record, cold TTFT under the Nov 11 refs (8k 13.80 s, 131k 57.89 s), warm
+below cold at 8k/32k/131k, a restart-then-restore of the 8k prompt faster than that cold
+number, a recorded short request during a long prefill, and four agents whose decode
+overlaps (aggregate above the fastest stream) at least at 95% of 102.7 tok/s.
 `tf127-pf4k` and `tf127-prefetch` also need `--token-baseline` from a replay run.
 Commands and rollback are in [`trial-runbook.md`](trial-runbook.md).

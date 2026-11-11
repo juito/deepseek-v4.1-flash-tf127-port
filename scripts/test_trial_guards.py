@@ -179,8 +179,12 @@ def main() -> int:
             check("TF_FILL_CHUNKS" not in assigned, "ttft-interleave does not set TF_FILL_CHUNKS")
         if path.name.startswith("tf127-"):
             check(assigned.get("PARALLEL") == "4", f"{path.name} PARALLEL=4")
+            check(assigned.get("TF_DSV41_SLOTS") == "4", f"{path.name} engine slots are 4")
+            check(assigned.get("TF_DSV41_POOL_TOKENS") == "1048576", f"{path.name} pool is the live 1M")
+            check(assigned.get("POOL") == "1048576", f"{path.name} recipe pool matches")
+            check(assigned.get("TF_DSV41_SLOT_DRAFTS") == "1", f"{path.name} keeps drafts on every slot")
+            check(assigned.get("TF_DSV41_SESSION_SLOTS") == "1", f"{path.name} keeps sessions on every slot")
             check(ctx == MAX_CONTEXT, f"{path.name} CONTEXT is 524288")
-            check("POOL" not in assigned, f"{path.name} does not raise POOL")
             check("TENSORFOLD_MEMORY_RESERVE_GIB" not in assigned, f"{path.name} does not lower the reserve")
             check(assigned.get("TF_DSV41_CONTEXT") == "524288", f"{path.name} sets the engine context")
             resident = float(assigned["TF_DSV41_SESSION_RESIDENT_GIB"])
@@ -488,6 +492,32 @@ def main() -> int:
     proc = subprocess.run(["bash", str(ROOT / "scripts" / "trial-env.sh")],
                           cwd=ROOT, env=env, text=True, capture_output=True, check=False)
     check(proc.returncode != 0 and "8888" in proc.stderr, "trial-env refuses PORT=8888")
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import gate_concurrency  # noqa: E402
+
+    overlapped = {
+        "errors": [],
+        "per_stream_decode_tok_s": [28.0, 26.0, 25.0, 27.0],
+        "aggregate_tok_s": 102.7,
+    }
+    check(gate_concurrency.reasons(overlapped) == [], "four overlapping agents at 102.7 tok/s pass")
+    serial = {
+        "errors": [],
+        "per_stream_decode_tok_s": [100.0, 100.0, 100.0, 100.0],
+        "aggregate_tok_s": 100.0,
+    }
+    serial_why = " ".join(gate_concurrency.reasons(serial))
+    check("did not overlap" in serial_why, "four serial agents do not pass on aggregate alone")
+    short = {
+        "errors": ["busy"],
+        "per_stream_decode_tok_s": [40.0, 40.0, 40.0],
+        "aggregate_tok_s": 120.0,
+    }
+    check("did not all finish" in " ".join(gate_concurrency.reasons(short)),
+          "a missing agent fails the gate")
+    check(gate_concurrency.reasons(None) == ["4-agent decode was not recorded"],
+          "a missing multi row is recorded")
 
     if failures:
         print(f"\n{failures} failure(s)", file=sys.stderr)

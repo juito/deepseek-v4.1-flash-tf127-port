@@ -44,7 +44,7 @@ It does not replace the live container `dsv41-1017-exl3-tf`, the live tag
 | `balanced.env` | Day-to-day | `CONTEXT=524288`, spill on, interleave 250, `GRAPH_CAP=128` |
 | `long-context.env` | More resident history | `CONTEXT=524288`, `POOL=2097152`, `KV_SHARD=1` |
 | `residency.env` | Kept conversations, full decode | `CONTEXT=524288`, `POOL=2097152`, `KV_SHARD=0` |
-| `tf127-baseline.env` | v1.2.7 fair baseline | `PARALLEL=4`, `TF_DSV41_PREFILL=full`, resident 0.5 GiB |
+| `tf127-baseline.env` | v1.2.7 fair baseline | `PARALLEL=4`, `TF_DSV41_SLOTS=4`, pool 1,048,576, `TF_DSV41_PREFILL=full`, resident 0.5 GiB |
 | `tf127-replay.env` | v1.2.7 TTFT trial | replay, NVMe session disk, 64 GiB budget, resident cap 3 GiB on both ranks |
 | `tf127-replay-2gib.env` | replay when the trough is under 4 GiB | resident cap 2 GiB |
 | `tf127-pf4k.env` | optional, exactness-gated | `TF_DSV41_PF_4K=1` (+0.66 GiB), `GM_V2=1`, replay |
@@ -75,15 +75,16 @@ With that headroom:
   More pool keeps more conversations resident, so follow-ups resume instead of re-prefilling.
 
 ```bash
-make plan                 # defaults to SparkOne's 6.97 GiB MemAvailable and says to leave POOL unset
+make plan                 # defaults to SparkOne's 6.97 GiB MemAvailable; the trial pool stays at 1M
 make profile NAME=tf127-replay
 scripts/engine-trial.sh --guard-only --profile profiles/tf127-replay.env
 ```
 
-`scripts/memory-plan.sh` no longer recommends spending that `MemAvailable` on `POOL`.
-The v1.2.7 profiles cap `TF_DSV41_SESSION_RESIDENT_GIB` at 3 (fallback 2) and leave the
-12.2 GiB engine reserve alone. Engram reads use the page cache. `GRAPH_CAP=128` stays the
-fork bound; the v1.2.7 profiles do not set it.
+`scripts/memory-plan.sh` keeps the trial at the live 1,048,576-position pool. Four engine
+slots and the session store need it, and raising it to 2,097,152 spends the page cache.
+The profiles cap `TF_DSV41_SESSION_RESIDENT_GIB` at 3 (fallback 2) and leave the 12.2 GiB
+engine reserve alone. Engram reads use the page cache. `GRAPH_CAP=128` stays the fork bound;
+the v1.2.7 profiles do not set it.
 
 ## Keeping 2.9 bpw
 

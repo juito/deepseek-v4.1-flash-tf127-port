@@ -193,12 +193,24 @@ for f in profiles/*.env; do
         echo "FAIL $f: v1.2.7 profiles keep CONTEXT=524288." >&2
         bad=1
       fi
-      if [ "$par" != 4 ]; then
-        echo "FAIL $f: v1.2.7 profiles keep PARALLEL=4." >&2
+      slots="$(kv TF_DSV41_SLOTS)"
+      pool_tok="$(kv TF_DSV41_POOL_TOKENS)"
+      slot_drafts="$(kv TF_DSV41_SLOT_DRAFTS)"
+      session_slots="$(kv TF_DSV41_SESSION_SLOTS)"
+      if [ "$par" != 4 ] || [ "$slots" != 4 ]; then
+        echo "FAIL $f: v1.2.7 profiles keep PARALLEL=4 and TF_DSV41_SLOTS=4. --parallel does not set the engine's live slots (default 1)." >&2
         bad=1
       fi
-      if [ -n "$pool" ]; then
-        echo "FAIL $f: v1.2.7 profiles leave POOL unset. MemAvailable on SparkOne is mostly Engram page cache." >&2
+      if [ "$pool" != 1048576 ] || [ "$pool_tok" != 1048576 ]; then
+        echo "FAIL $f: v1.2.7 profiles set POOL and TF_DSV41_POOL_TOKENS to 1048576 (the live 1M pool). Slots above 1 need that pool. 2097152 spends the page cache." >&2
+        bad=1
+      fi
+      if [ "$slot_drafts" != 1 ]; then
+        echo "FAIL $f: TF_DSV41_SLOT_DRAFTS=1 keeps DSpark on all 4 slots. Drafts are refused without it." >&2
+        bad=1
+      fi
+      if [ "$session_slots" != 1 ]; then
+        echo "FAIL $f: TF_DSV41_SESSION_SLOTS=1 keeps the session store on. With SLOTS above 1 it otherwise turns off." >&2
         bad=1
       fi
       if [ -z "$resident" ]; then
