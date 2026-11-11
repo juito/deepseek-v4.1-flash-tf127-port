@@ -6,14 +6,18 @@
 # Reserve: MEMGUARD_GIB (2.5) plus ~1.0 GiB slack for the head's other work.
 #
 # Usage: scripts/memory-plan.sh [FREE_GIB]
-# The default 9 is an unmeasured assumption. The recipe records about
-# 6.2-6.5 GiB MemAvailable after the weights load (docs/memory-and-safety.md,
-# CHANGELOG). Pass the number you actually read.
+# Nov 11 ~2 PM PST, live Sparks: SparkOne MemAvailable 6.96-6.98 GiB, of which
+# 1.23 GiB is truly free (the rest is Engram page cache and margin). Headroom
+# is about 2-3 GiB. SparkTwo MemAvailable 8.59 GiB. Do not spend that on a
+# larger POOL or on more bits. The v1.2.7 trial caps TF_DSV41_SESSION_RESIDENT_GIB
+# at 3 (fallback 2) and leaves the 12.2 GiB engine reserve alone.
+# The table below is the old pool math. It treats the number you pass as
+# spendable. MemAvailable on Nov 11 was not spendable.
 set -uo pipefail
 
-free="${1:-9}"
+free="${1:-6.97}"
 if [ "$#" -eq 0 ]; then
-  echo "note: 9 GiB is an unmeasured assumption. The recipe records ~6.2-6.5 GiB MemAvailable after load. Pass the number you measure." >&2
+  echo "note: defaulting to SparkOne's Nov 11 MemAvailable, 6.97 GiB. Only 1.23 GiB of that was truly free. Pass the number you read." >&2
 fi
 reserve=3.5
 
@@ -37,14 +41,10 @@ BEGIN {
     printf "%-12d %-12.2f %-12.2f %-12.2f %s\n", p, u, s, head, verdict
   }
   printf "\n"
+  printf "trial budget: leave POOL unset. Cap TF_DSV41_SESSION_RESIDENT_GIB at 3 on both ranks (2 if the MemAvailable trough is under 4 GiB).\n"
+  printf "  SparkOne headroom is about 2-3 GiB. Truly free on Nov 11 was 1.23 GiB; the rest of MemAvailable is Engram page cache.\n"
+  printf "  Memguard still kills at 2.5 GiB for 4 s (hard 1 GiB). Do not lower TENSORFOLD_MEMORY_RESERVE_GIB below 12.2.\n"
   if (best > 0) {
-    printf "recommended: POOL=%d with KV_SHARD=0 (%.2f GiB, %.2f GiB headroom left)\n", best, best / 1048576 * 1.0, free - best / 1048576 * 1.0
-    printf "  the documented case: four concurrent 500K-token prompts\n"
-    if (ceiling > best)
-      printf "  ceiling if you routinely hold >4 long conversations: POOL=%d (%.2f GiB, %.2f GiB headroom)\n", ceiling, ceiling / 1048576 * 1.0, free - ceiling / 1048576 * 1.0
-    printf "  beyond ~4M the typical working set is already resident; extra pool is given-away headroom\n"
-  } else {
-    printf "recommended: keep POOL empty (the window only) and leave the RAM as Engram page cache\n"
+    printf "old pool math would have said POOL=%d (%.2f GiB). That spends the page cache. The v1.2.7 profiles do not set it.\n", best, best / 1048576 * 1.0
   }
-  printf "KV sharding would halve the KV cost but costs 1-4%% decode; with this much spare you do not need it\n"
 }'

@@ -23,9 +23,11 @@ for f in profiles/*.env; do
     val="${line#*=}"
     val="${val%%#*}"; val="$(echo "$val" | tr -d '[:space:]')"
 
-    # passthrough variables reach both ranks through start.sh's env scan
+    # passthrough variables reach both ranks. TF_DSV41_* is the v1.2.7 family.
+    # The recipe launcher only forwards names it scans; scripts/engine-trial.sh
+    # forwards TF_DSV41_* itself. A fork profile's TF_DS_* names are not v1.2.7 levers.
     case "$key" in
-      TENSORFOLD_*|TF_DS_*|TF_FILL_*|TF_SPILL_*|TF_RDMA_*) ;;
+      TENSORFOLD_*|TF_DS_*|TF_FILL_*|TF_SPILL_*|TF_RDMA_*|TF_DSV41_*) ;;
       *)
         if ! grep -qx "$key" <<<"$known"; then
           echo "FAIL $f: unknown setting '$key' (not in config.sh/port.sh)" >&2
@@ -109,6 +111,106 @@ for f in profiles/*.env; do
     echo "FAIL $f: TF_FILL_CHUNKS=$fill and PREFILL_INTERLEAVE_MS=${inter:-<unset, recipe default 250>} are mutually exclusive. Use ttft-fill (chunks, interleave 0) or ttft-interleave (interleave 250, no TF_FILL_CHUNKS)." >&2
     bad=1
   fi
+
+  kv() {
+    grep -E "^$1=" "$f" | head -1 | cut -d= -f2- | sed 's/#.*//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+  }
+  prefill="$(kv TF_DSV41_PREFILL)"
+  resident="$(kv TF_DSV41_SESSION_RESIDENT_GIB)"
+  disk="$(kv TF_DSV41_SESSION_DISK)"
+  disk_gib="$(kv TF_DSV41_SESSION_DISK_GIB)"
+  reserve="$(kv TENSORFOLD_MEMORY_RESERVE_GIB)"
+  eaq="$(kv EAQ_V1_1)"
+  ablit="$(kv ABLIT)"
+  pf4k="$(kv TF_DSV41_PF_4K)"
+  pf4k_ok="$(kv TF_DSV41_PF_4K_MEMORY_OK)"
+  gm="$(kv TF_DSV41_GM_V2)"
+  pieces="$(kv TF_DSV41_PREFILL_PIECES)"
+  own="$(kv TF_DSV41_OWN_PREFILL)"
+  tail="$(kv TF_DSV41_PROMPT_TAIL)"
+  floor_flag="$(kv TF_DSV41_PIECES_FLOOR)"
+  dsv_ctx="$(kv TF_DSV41_CONTEXT)"
+  par="$(kv PARALLEL)"
+  base="$(basename "$f")"
+
+  if [ "$eaq" = 1 ]; then
+    echo "FAIL $f: EAQ_V1_1=1 changes bits. Stay on EAQ v1 45ee5d0f." >&2
+    bad=1
+  fi
+  if [ "$ablit" = 1 ]; then
+    echo "FAIL $f: ABLIT=1 is refused." >&2
+    bad=1
+  fi
+  if [ -n "$reserve" ]; then
+    if ! awk -v v="$reserve" 'BEGIN{exit !(v+0 >= 12.2)}'; then
+      echo "FAIL $f: TENSORFOLD_MEMORY_RESERVE_GIB=$reserve is below 12.2. Leave the engine reserve alone." >&2
+      bad=1
+    fi
+  fi
+  if [ -n "$resident" ]; then
+    if ! awk -v v="$resident" 'BEGIN{exit !(v+0 > 0 && v+0 <= 3)}'; then
+      echo "FAIL $f: TF_DSV41_SESSION_RESIDENT_GIB=$resident must be above 0 and at most 3. Unset is unlimited." >&2
+      bad=1
+    fi
+  fi
+  if [ "$prefill" = replay ]; then
+    if [ -z "$resident" ]; then
+      echo "FAIL $f: TF_DSV41_PREFILL=replay with TF_DSV41_SESSION_RESIDENT_GIB unset is unlimited. Set 3, or 2 when the trough is under 4 GiB." >&2
+      bad=1
+    fi
+    if [ -z "$disk" ]; then
+      echo "FAIL $f: TF_DSV41_PREFILL=replay needs TF_DSV41_SESSION_DISK on local NVMe." >&2
+      bad=1
+    fi
+    if [ "$disk_gib" != 64 ]; then
+      echo "FAIL $f: TF_DSV41_SESSION_DISK_GIB must be 64 (the budget). Got '${disk_gib:-unset}'." >&2
+      bad=1
+    fi
+  fi
+  if [ "$pf4k" = 1 ]; then
+    if [ "$pf4k_ok" != 1 ] || [ "$prefill" != replay ] || { [ "$gm" != 1 ] && [ "$gm" != split ]; }; then
+      echo "FAIL $f: TF_DSV41_PF_4K=1 needs TF_DSV41_PF_4K_MEMORY_OK=1, TF_DSV41_PREFILL=replay, and TF_DSV41_GM_V2=1 or split." >&2
+      bad=1
+    fi
+  fi
+  if [ "$pieces" = 1 ]; then
+    if [ "$own" != 1 ] || [ "$tail" != verify ]; then
+      echo "FAIL $f: TF_DSV41_PREFILL_PIECES=1 needs TF_DSV41_OWN_PREFILL=1 and TF_DSV41_PROMPT_TAIL=verify, or prompts run whole." >&2
+      bad=1
+    fi
+  fi
+  if [ "$floor_flag" = 1 ]; then
+    echo "FAIL $f: TF_DSV41_PIECES_FLOOR=1 turns on a hard floor of 4 GiB. SparkOne's headroom is 2-3 GiB." >&2
+    bad=1
+  fi
+  if [ -n "$dsv_ctx" ] && [ -n "$ctx" ] && [ "$dsv_ctx" != "$ctx" ]; then
+    echo "FAIL $f: TF_DSV41_CONTEXT=$dsv_ctx disagrees with CONTEXT=$ctx." >&2
+    bad=1
+  fi
+  case "$base" in
+    tf127-*)
+      if [ "$ctx" != 524288 ]; then
+        echo "FAIL $f: v1.2.7 profiles keep CONTEXT=524288." >&2
+        bad=1
+      fi
+      if [ "$par" != 4 ]; then
+        echo "FAIL $f: v1.2.7 profiles keep PARALLEL=4." >&2
+        bad=1
+      fi
+      if [ -n "$pool" ]; then
+        echo "FAIL $f: v1.2.7 profiles leave POOL unset. MemAvailable on SparkOne is mostly Engram page cache." >&2
+        bad=1
+      fi
+      if [ -z "$resident" ]; then
+        echo "FAIL $f: v1.2.7 profiles set TF_DSV41_SESSION_RESIDENT_GIB. Unset is unlimited." >&2
+        bad=1
+      fi
+      if [ "$dsv_ctx" != 524288 ]; then
+        echo "FAIL $f: v1.2.7 profiles set TF_DSV41_CONTEXT=524288. The engine default slot is 4096." >&2
+        bad=1
+      fi
+      ;;
+  esac
 done
 
 if [ "$bad" = 0 ]; then
