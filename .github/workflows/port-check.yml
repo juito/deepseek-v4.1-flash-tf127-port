@@ -1,0 +1,59 @@
+name: port-check
+
+# Re-runs the patch triage against the pinned upstream tag on every push.
+# No GPU, no model weights: this only checks how much of the recipe's patch
+# series still applies, so drift shows up in the diff instead of silently.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      tf_tag:
+        description: "TensorFold tag to triage against"
+        required: false
+        default: "v1.2.7"
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Triage the patch series
+        env:
+          TF_TAG: ${{ inputs.tf_tag || 'v1.2.7' }}
+        run: |
+          chmod +x scripts/triage.sh
+          scripts/triage.sh
+
+      - name: Summarize
+        run: |
+          total=$(($(wc -l < triage.csv) - 1))
+          applies=$(grep -c ',APPLIES,' triage.csv || true)
+          blocked=$(grep -c ',BLOCKED,' triage.csv || true)
+          {
+            echo "### Patch triage against \`${{ inputs.tf_tag || 'v1.2.7' }}\`"
+            echo ""
+            echo "| patches | applying | blocked |"
+            echo "|---|---|---|"
+            echo "| $total | $applies | $blocked |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail on drift
+        run: |
+          # 0029 is the only patch that applies today; a change here means the
+          # engine moved and the triage table in PORT-STATUS.md needs updating.
+          applies=$(grep -c ',APPLIES,' triage.csv || true)
+          if [ "$applies" != "1" ]; then
+            echo "::error::Expected 1 applying patch, got $applies. Update PORT-STATUS.md."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: triage
+          path: triage.csv
