@@ -33,7 +33,7 @@ fast they make a kernel.
 | 7 | **Indexer split** (on from token 131,072 by default) | Splits the prefill indexer's row blocks across the two ranks and all-gathers the selections | **+4.25% at 256K**, **+7.46% at 400K** cold prefill | Replies keep their bits |
 | 8 | **`MAX_TOKENS` and `PARALLEL`** | Admission reserves `prompt + max_tokens + ROUND_ROWS + 2` per stream | Smaller reservations admit more streams, so fewer requests queue behind each other | Lower `MAX_TOKENS` truncates long thinking; clients can override per request |
 | 9 | **`CONTEXT` on a busy head** | A smaller window means a smaller KV pool and less pressure on kept states | More kept states survive, so more turns resume instead of re-prefilling | Caps the longest prompt a request may use |
-| 10 | **`ROUND_ROWS=32`** (opt-in kernel build) | A 32-row decode/prefill window; the pinned kit has row kernels only through 16, so this needs `-Dport_kernels` | **17.2% faster prefill**, 32% faster one-stream code decode (patch `0017`) | Build change, not a setting. Re-run `tools/exact.py` |
+| 10 | **`ROUND_ROWS=32`** (a later `KIT_REF`) | A 32-row window needs a kit with `_rowmm_parts` variants above 16 | **Unproven for this model.** No DeepSeek-V4.1 measurement exists in the recipe; wider kernels are still under review (#31) | Not available on the pinned kit: `start.sh` rejects `ROUND_ROWS` above 16. Treat any claim about it as unmeasured |
 | — | **`KV_SHARD=1`** | Splits the KV pool one part a Spark, halving KV memory | **Not a TTFT lever**: decode is 1–4% slower. It buys memory headroom, which indirectly protects kept states | Use it for context, not for TTFT |
 
 ## What not to do

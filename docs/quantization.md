@@ -43,11 +43,12 @@ A setting that improves TTFT and fails `exact.py` is a regression, not an optimi
 
 ## Where bits legitimately change
 
-Only two places, and both must be re-baselined:
+One place only: **a different pack** — EAQ v1.1, a new bpw, or `ABLIT=1`'s overlay. All of them must
+be re-baselined before any comparison. The overlay's graft also had to give four MTP tensors their
+stock F16 bytes back (`scripts/ablit_stock_dtypes.py`); with the F32 copy the confidence head
+computed garbage and ABLIT drafted 0.2–0.8 tokens a round.
 
-- **A different pack** (EAQ v1.1, a new bpw, `ABLIT=1`'s overlay). The overlay's graft also had to
-  give four MTP tensors their stock F16 bytes back (`scripts/ablit_stock_dtypes.py`); with the F32
-  copy the confidence head computed garbage and ABLIT drafted 0.2–0.8 tokens a round.
-- **`ROUND_ROWS=32`** with the opt-in kernel split (`zig/patches/0017`). The EXL3 kernels compute
-  each row in a fixed order, which is why EAQ v1 held its bits across round shapes — but a new
-  kernel path is still a new path. Re-run `exact.py` before keeping it.
+A kernel change is the other theoretical risk, but the only wider-row path (`ROUND_ROWS=32`) is not
+reachable on the pinned kit: no `_rowmm_parts` specialization above 16 exists, `start.sh` rejects the
+value, and the recipe records no DeepSeek-V4.1 measurement for it (wider kernels are under review in
+#31). Do not assume a number here.
