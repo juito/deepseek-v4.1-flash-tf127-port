@@ -240,8 +240,12 @@ profiles: `TF_DSV41_PREFILL`, `TF_DSV41_SESSION_DISK`, `TF_DSV41_SESSION_DISK_GI
 `TF_DSV41_PREFILL_INTERLEAVE_MS` are new names in the overlay (`kv/sched.zig`); they are
 not upstream 1.2.7 names.
 
-The overlay is `engine/patches/0001-server-dsml-anthropic-and-prefill-cut-in.patch`.
-`git apply --check` accepts it on a clean v1.2.7 tree at `93a2e93ece`. It ports the
+The overlay is `engine/patches/0001-server-dsml-anthropic-and-prefill-cut-in.patch`
+and `engine/patches/0002-sampling-bos-roce-rank.patch`. The map of all 53 fork
+tunings, and what 0002 changes, is [`MIA-TUNING-MAP.md`](MIA-TUNING-MAP.md).
+
+`git apply --check` accepts `0001` on a clean v1.2.7 tree at `93a2e93ece`, and `0002`
+after it. `0001` ports the
 newline DSML opener, a value that contains its block closer, the orphan-closer diagnostic,
 empty `reasoning_content` falling through to a non-empty `reasoning` (an empty string with
 no alternate is still stored, so the template goldens keep `<think></think>`), Anthropic
@@ -255,6 +259,7 @@ Host tests on this x86_64 VM, Zig 0.17.0, against the patched tree (not a GB10 b
 | `zig build test-tool-parse-host` | 56/56 pass, including the newline hide and a closer inside a parameter value |
 | `zig build test-dsv41-serve-host` | 15 pass, 5 skip; template goldens match, including the empty-`reasoning_content` fallthrough |
 | `zig build test-dsv41-kv` | 31/31 pass, including short-prompt cut-in and `TF_DSV41_PREFILL_INTERLEAVE_MS` |
+| `zig build test-dsv41-device-host` (this change) | 221/221 pass, including the sampler default of on |
 | server module, filter `output diagnostic` plus the thinking-tail filter | 37/37 pass |
 
 The Anthropic budget and `clear_thinking_*` edits typecheck because that server module

@@ -190,9 +190,16 @@ def main() -> int:
             resident = float(assigned["TF_DSV41_SESSION_RESIDENT_GIB"])
             check(0 < resident <= 3, f"{path.name} resident cap is {resident}")
             check("EAQ_V1_1" not in assigned and "ABLIT" not in assigned, f"{path.name} stays on EAQ v1")
+            check(assigned.get("TF_DSV41_SERVE_DIP_GIB") == "2.5", f"{path.name} boot dip is 2.5 GiB")
+            check(assigned.get("TF_DSV41_SAMPLING") == "1", f"{path.name} builds the sampler")
         if path.name == "tf127-baseline.env":
             check(assigned.get("TF_DSV41_PREFILL") == "full", "baseline prefill is full")
             check(assigned.get("TF_DSV41_SESSION_RESIDENT_GIB") == "0.5", "baseline residency is 0.5 GiB")
+        if path.name == "tf127-speed.env":
+            check(assigned.get("TF_DSV41_PREFILL") == "full", "speed profile stays on full prefill")
+            check(assigned.get("TF_DSV41_GM_V2") == "1", "speed profile uses x3gm v2")
+            check(assigned.get("TF_DSV41_ROUND_GRAPH") == "1", "speed profile captures the decode round")
+            check(assigned.get("TF_COMM_BACKEND") == "roce", "speed profile asks for RoCE")
         if path.name == "tf127-replay.env":
             check(assigned.get("TF_DSV41_PREFILL") == "replay", "replay prefill")
             check(assigned.get("TF_DSV41_SESSION_RESIDENT_GIB") == "3", "replay resident cap is 3 GiB")

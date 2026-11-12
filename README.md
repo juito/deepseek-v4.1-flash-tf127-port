@@ -94,6 +94,15 @@ See [`docs/quantization.md`](docs/quantization.md). The default pack is
 indexer/compressor linears as BF16 — **different bits**, experimental, and it invalidates that
 baseline. Every profile here is scheduling, so the baseline stays valid.
 
+## Speed trial on v1.2.7
+
+[`docs/MIA-TUNING-MAP.md`](docs/MIA-TUNING-MAP.md) is the patch-by-patch map.
+`profiles/tf127-speed.env` is the profile to time against Mia: full prefill, RoCE,
+the keyed sampler, dip 2.5 GiB, x3gm v2, and the decode-round graph. `scripts/build-prepare.sh`
+on a Spark builds the trial image and packs Engram to
+`~/.cache/dsv41-tensorfold/engram-1bae0e10/engram-l{1,14}-r{0,1}of2.bin`. It does not
+start a server and does not bind an address.
+
 ## The v1.2.7 port
 
 [`docs/port-status.md`](docs/port-status.md) has the full picture and the 53-patch triage:
@@ -121,12 +130,14 @@ docs/first-token.md      TTFT playbook: ranked levers, mechanism, cost, measurem
 docs/quantization.md     2.9 bpw invariant, EAQ v1 vs v1.1, what must re-baseline
 docs/spare-memory.md     what the RAM left after the weights can and cannot buy
 docs/port-status.md      v1.2.7 triage, why 52/53 are blocked, validation gate
+docs/MIA-TUNING-MAP.md   each Mia tuning and its 1.2.7 equivalent
 docs/trial-runbook.md    side image, stop-live, matched gate, rollback
 profiles/*.env           layered presets, validated against config.sh/port.sh
 tools/ttft.py            TTFT on port 8890; refuses 8888 and 18004
 tools/bench.py           same guard, then the recipe bench
 scripts/trial.sh         start path for the current recipe pin (distinct container, tag, port, host)
 scripts/engine-trial.sh  start path for the v1.2.7 image
+scripts/build-prepare.sh fetch, build the trial image, pack Engram (on a Spark)
 scripts/gate.sh          on-hardware gate: TTFT, restore, 4-stream, exact.py, MemAvailable floor
 scripts/profile.sh       write profiles/<name>.env into the recipe's local.sh
 scripts/check-profiles.sh validate keys, grid, CONTEXT <= 524288, fill vs interleave

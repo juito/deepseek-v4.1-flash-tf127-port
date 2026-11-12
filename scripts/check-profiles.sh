@@ -27,7 +27,7 @@ for f in profiles/*.env; do
     # The recipe launcher only forwards names it scans; scripts/engine-trial.sh
     # forwards TF_DSV41_* itself. A fork profile's TF_DS_* names are not v1.2.7 levers.
     case "$key" in
-      TENSORFOLD_*|TF_DS_*|TF_FILL_*|TF_SPILL_*|TF_RDMA_*|TF_DSV41_*) ;;
+      TENSORFOLD_*|TF_DS_*|TF_FILL_*|TF_SPILL_*|TF_RDMA_*|TF_DSV41_*|TF_TP_*|TF_COMM_BACKEND|NCCL_*) ;;
       *)
         if ! grep -qx "$key" <<<"$known"; then
           echo "FAIL $f: unknown setting '$key' (not in config.sh/port.sh)" >&2
@@ -219,6 +219,14 @@ for f in profiles/*.env; do
       fi
       if [ "$dsv_ctx" != 524288 ]; then
         echo "FAIL $f: v1.2.7 profiles set TF_DSV41_CONTEXT=524288. The engine default slot is 4096." >&2
+        bad=1
+      fi
+      if [ "$(kv TF_DSV41_SERVE_DIP_GIB)" != 2.5 ]; then
+        echo "FAIL $f: TF_DSV41_SERVE_DIP_GIB=2.5. The engine default 3.0 misses the boot floor by about 0.03 GiB on these Sparks." >&2
+        bad=1
+      fi
+      if [ "$(kv TF_DSV41_SAMPLING)" != 1 ]; then
+        echo "FAIL $f: TF_DSV41_SAMPLING=1. Omitting temperature samples at 1.0, and an unbuilt sampler is HTTP 500 Sampling." >&2
         bad=1
       fi
       ;;
