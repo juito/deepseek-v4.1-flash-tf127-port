@@ -71,8 +71,14 @@ Upstream `#2182`, not remeasured here: a 319K restore in 1.2–1.4 s against 155
 replies byte-identical.
 
 ```bash
+# on a Spark. Packs Engram and builds the trial image. Does not bind a port.
+MODEL=/path/to/eaq-v1 ENGRAM_RELEASE=/path/to/release-snapshot \
+  TF_DSV41_ASSETS=/nvme/dsv41-assets scripts/build-prepare.sh
+# the script prints the start line. The speed profile is the one to time:
+MODEL=/path/to/eaq-v1 TF_DSV41_ASSETS=/nvme/dsv41-assets \
+  scripts/engine-trial.sh --stop-live --profile profiles/tf127-speed.env restart
+# older path, still valid:
 scripts/fetch-engine.sh
-# on a Spark:
 scripts/build-image.sh
 MODEL=/path/to/eaq-v1 TF_DSV41_ASSETS=/path/to/assets scripts/prepare-assets.sh
 # point TF_DSV41_SESSION_DISK in the profile at this Spark's local NVMe, then:

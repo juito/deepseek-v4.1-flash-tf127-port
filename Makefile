@@ -32,6 +32,7 @@ check:
 	@bash -n scripts/fetch-engine.sh && echo "bash OK: scripts/fetch-engine.sh"
 	@bash -n scripts/prepare-assets.sh && echo "bash OK: scripts/prepare-assets.sh"
 	@bash -n scripts/build-image.sh && echo "bash OK: scripts/build-image.sh"
+	@bash -n scripts/build-prepare.sh && echo "bash OK: scripts/build-prepare.sh"
 	@bash -n scripts/port-hash.sh && echo "bash OK: scripts/port-hash.sh"
 	@scripts/gate.sh --self-check
 	@python3 -m py_compile tools/endpoint_guard.py tools/bench.py scripts/gate_concurrency.py && echo "python OK: tools/endpoint_guard.py tools/bench.py scripts/gate_concurrency.py"

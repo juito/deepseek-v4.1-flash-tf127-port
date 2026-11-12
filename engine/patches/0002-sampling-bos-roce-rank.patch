@@ -1,0 +1,275 @@
+diff --git a/zig/src/cuda/exl3_block_exl3.zig b/zig/src/cuda/exl3_block_exl3.zig
+index bd1ee6f..0b7ce08 100644
+--- a/zig/src/cuda/exl3_block_exl3.zig
++++ b/zig/src/cuda/exl3_block_exl3.zig
+@@ -521,6 +521,13 @@ test "x3gm shapes, fits and tuning as the reference tuner" {
+     // 4,096 rows (64 members): the 4K entry, cfg 3 / 2 when it fits the width
+     try std.testing.expectEqual([2]usize{ 3, 2 }, gmTuned(&tune_default, null, null, 4096, 6, 384, true, 6, 6));
+     try std.testing.expectEqual([2]usize{ 2, 2 }, gmTuned(&tune_default, null, null, 4096, 6, 384, false, 6, 6));
++    // GB10 opt-in is 101376 B. GM_GU3 at two inputs (xm=2) asks for 107520..129024 B dynamic
++    // plus 528 B static (rows_sh[128] + item) and is refused at resolve. The tuner must not select it.
++    try std.testing.expect(!gmFits(.gu, 3, 3, 2));
++    try std.testing.expect(!gmFits(.gu, 3, 10, 2));
++    const two = gmTuned(&tune_default, null, null, 4096, 6, 384, false, 10, 6);
++    try std.testing.expect(gmFits(.gu, two[0], 10, 2));
++    try std.testing.expect(gmSmemBytes(gu_tiles[two[0]], 2, 2, 10) <= gm_smem_max);
+     try std.testing.expectEqual([2]usize{ 5, 4 }, gmTuned(&tune_default, 5, 4, 4096, 6, 384, false, 6, 6));
+ }
+ 
+diff --git a/zig/src/families/deepseek_v41/cuda_model.zig b/zig/src/families/deepseek_v41/cuda_model.zig
+index e4304af..adf6091 100644
+--- a/zig/src/families/deepseek_v41/cuda_model.zig
++++ b/zig/src/families/deepseek_v41/cuda_model.zig
+@@ -430,7 +430,7 @@ pub const Model = struct {
+         if (m.sessions) |x| x.ds_set = .{ .ctx = m, .set = setDsValid, .get = getDsValid };
+         m.gt.ingest_window = m.cfg.window;
+         tr.step("drafts and rows", cuda.usage(false));
+-        // TF_DSV41_SAMPLING=1: keyed sampling (T > 0) on every rank; off: such requests are refused (error.Sampling)
++        // TF_DSV41_SAMPLING unset: keyed sampling (T > 0) on every rank. =0 refuses those requests (error.Sampling).
+         m.sampler = if ((try samp.enabled())) try samp.GpuSampler.init(gpa, &m.f) else null;
+         m.gt.sampler = m.sampler;
+         try m.driver.synchronize();
+diff --git a/zig/src/families/deepseek_v41/engine_hooks.zig b/zig/src/families/deepseek_v41/engine_hooks.zig
+index 455e339..44f339d 100644
+--- a/zig/src/families/deepseek_v41/engine_hooks.zig
++++ b/zig/src/families/deepseek_v41/engine_hooks.zig
+@@ -10,7 +10,7 @@ fn currentFn() anyerror!ft.RoundGraph {
+ }
+ 
+ const round_graph_table: hooks.RoundGraph = .{ .current = currentFn, .splitAt = round_graph.splitAt };
+-const greedy_table: hooks.Greedy = .{ .argmax = greedy.argmax };
++const greedy_table: hooks.Greedy = .{ .argmax = greedy.argmax, .argmaxExcept = greedy.argmaxExcept };
+ 
+ /// Every part set (the same table for every forward), then `f`'s prefill state; right after Forward.init.
+ pub fn open(f: *Forward) !void {
+diff --git a/zig/src/families/deepseek_v41/env_startup_test.zig b/zig/src/families/deepseek_v41/env_startup_test.zig
+index 790af32..0de5a73 100644
+--- a/zig/src/families/deepseek_v41/env_startup_test.zig
++++ b/zig/src/families/deepseek_v41/env_startup_test.zig
+@@ -50,7 +50,7 @@ test "DeepSeek strict env: actual flag readers keep defaults, zero, one and name
+         .{ .name = "TF_DSV41_OWN_PREFILL", .default = true, .read = model.ownPrefillEnv },
+         .{ .name = "TF_DSV41_PREFILL_PIECES", .default = false, .read = model.Model.piecesEnv },
+         .{ .name = "TF_DSV41_SLOT_DRAFTS", .default = false, .read = @import("dspark_rows.zig").enabled },
+-        .{ .name = "TF_DSV41_SAMPLING", .default = false, .read = @import("sampling_gpu.zig").enabled },
++        .{ .name = "TF_DSV41_SAMPLING", .default = true, .read = @import("sampling_gpu.zig").enabled },
+         .{ .name = "TF_DSV41_FORMS_INPLACE", .default = false, .read = @import("forms_inplace.zig").enabled },
+         .{ .name = "TF_DSV41_EX_STACKS", .default = false, .read = @import("ex_stacks.zig").enabled },
+         .{ .name = "TF_DSV41_STREAM_LAZY", .default = false, .read = @import("longpf.zig").lazyEnv },
+diff --git a/zig/src/families/deepseek_v41/forward_hooks.zig b/zig/src/families/deepseek_v41/forward_hooks.zig
+index 7742013..c9af02a 100644
+--- a/zig/src/families/deepseek_v41/forward_hooks.zig
++++ b/zig/src/families/deepseek_v41/forward_hooks.zig
+@@ -39,7 +39,11 @@ pub const RoundGraph = struct {
+ };
+ 
+ /// greedy.zig: the host's best column of a row.
+-pub const Greedy = struct { argmax: *const fn (vals: []const f32) usize };
++pub const Greedy = struct {
++    argmax: *const fn (vals: []const f32) usize,
++    /// `skip` is this rank's BOS column, or null. NaN columns are not candidates.
++    argmaxExcept: *const fn (vals: []const f32, skip: ?usize) usize,
++};
+ 
+ /// vision_rows.zig: rank 0's image rows (`Forward.vision`), the no-image window check and the prefill's image glue.
+ pub const Vision = struct {
+diff --git a/zig/src/families/deepseek_v41/forward_sample.zig b/zig/src/families/deepseek_v41/forward_sample.zig
+index 67fedf9..3a4231b 100644
+--- a/zig/src/families/deepseek_v41/forward_sample.zig
++++ b/zig/src/families/deepseek_v41/forward_sample.zig
+@@ -85,10 +85,13 @@ pub fn greedy(f: *Forward, out: []u32) !void {
+     } else {
+         try r.d.check(r.d.api.cuMemcpyDtoHAsync_v2(host.ptr, logits, 4 * n * V, r.stream.handle), "cuMemcpyDtoHAsync");
+         try r.stream.synchronize();
+-        const argmax = (try hooks.greedy()).argmax;
++        const argmax = (try hooks.greedy()).argmaxExcept;
++        // This rank's BOS column. Leaving it eligible made a NaN or a repeated BOS logit the greedy token.
++        const bos = f.cfg.bos;
++        const skip: ?usize = if (bos >= vocab_part.lo and bos < vocab_part.lo + V) bos - vocab_part.lo else null;
+         for (0..n) |row| {
+             const vals = host[row * V ..][0..V];
+-            const best = argmax(vals);
++            const best = argmax(vals, skip);
+             pairs[2 * row] = vals[best];
+             pairs[2 * row + 1] = @floatFromInt(best + vocab_part.lo);
+         }
+diff --git a/zig/src/families/deepseek_v41/greedy.zig b/zig/src/families/deepseek_v41/greedy.zig
+index 15a1115..7a10f72 100644
+--- a/zig/src/families/deepseek_v41/greedy.zig
++++ b/zig/src/families/deepseek_v41/greedy.zig
+@@ -1,43 +1,34 @@
+-//! Greedy's host step: a row's largest logit by `x > best`, the lowest column on ties (vectorized, same pick).
++//! Greedy's host step: the lowest column of the largest finite logit. NaN is skipped.
+ 
+ const std = @import("std");
+ 
+-const lanes = 16;
+-const V = @Vector(lanes, f32);
++/// The lowest column of the largest finite logit. NaN is not a candidate: a NaN in column 0
++/// used to pin the pick there (`x > NaN` is never true), and on rank 0 that column is BOS.
++/// `skip` is that column when this rank owns the BOS id; null skips nothing.
++pub fn argmaxExcept(vals: []const f32, skip: ?usize) usize {
++    const banned = skip orelse std.math.maxInt(usize);
++    var best: usize = 0;
++    var have = false;
++    for (vals, 0..) |x, i| {
++        if (i == banned or std.math.isNan(x)) continue;
++        if (!have or x > vals[best]) {
++            best = i;
++            have = true;
++        }
++    }
++    return best;
++}
+ 
+-/// The column the scalar loop `best = 0; for i: if (x[i] > x[best]) best = i` returns.
++/// The column `argmaxExcept(vals, null)` returns.
+ pub fn argmax(vals: []const f32) usize {
+-    if (vals.len == 0 or std.math.isNan(vals[0])) return 0;
+-    var acc: V = @splat(-std.math.inf(f32));
+-    var i: usize = 0;
+-    while (i + lanes <= vals.len) : (i += lanes) {
+-        const x: V = vals[i..][0..lanes].*;
+-        acc = @select(f32, x > acc, x, acc);
+-    }
+-    var m: f32 = -std.math.inf(f32);
+-    const lane: [lanes]f32 = acc;
+-    for (lane) |x| m = if (x > m) x else m;
+-    for (vals[i..]) |x| m = if (x > m) x else m;
+-    // vals[0] is not NaN, so the maximum is a value of the row (-inf at least): its first column
+-    const want: V = @splat(m);
+-    i = 0;
+-    while (i + lanes <= vals.len) : (i += lanes) {
+-        const x: V = vals[i..][0..lanes].*;
+-        if (@reduce(.Or, x == want)) for (vals[i..][0..lanes], i..) |y, k| if (y == m) return k;
+-    }
+-    for (vals[i..], i..) |x, k| if (x == m) return k;
+-    unreachable;
++    return argmaxExcept(vals, null);
+ }
+ 
+ fn scalar(vals: []const f32) usize {
+-    var best: usize = 0;
+-    for (vals, 0..) |x, i| if (x > vals[best]) {
+-        best = i;
+-    };
+-    return best;
++    return argmaxExcept(vals, null);
+ }
+ 
+-test "greedy argmax: the scalar loop's column on ties, signed zeros, infinities and NaN" {
++test "greedy argmax: lowest finite column, NaN skipped, BOS column skippable" {
+     const nan = std.math.nan(f32);
+     const inf = std.math.inf(f32);
+     const cases = [_][]const f32{
+@@ -49,8 +40,17 @@ test "greedy argmax: the scalar loop's column on ties, signed zeros, infinities
+         &.{ 2, nan, 7, nan },
+         &.{ -inf, nan, nan },
+         &.{ inf, inf },
++        &.{nan},
+     };
+-    for (cases) |c| try std.testing.expectEqual(scalar(c), argmax(c));
++    const want = [_]usize{ 1, 0, 0, 0, 2, 2, 0, 0, 0 };
++    for (cases, want) |c, w| {
++        try std.testing.expectEqual(w, argmax(c));
++        try std.testing.expectEqual(scalar(c), argmax(c));
++    }
++    // a finite BOS logit in column 0 must not win when another finite logit exists
++    var bos = [_]f32{ 40, 1, 3, nan };
++    try std.testing.expectEqual(@as(usize, 2), argmaxExcept(&bos, 0));
++    try std.testing.expectEqual(@as(usize, 0), argmaxExcept(&bos, null));
+     // random rows of a rank's vocabulary width with planted ties, zeros and NaNs, past the vector width's tail
+     var prng = std.Random.DefaultPrng.init(4101);
+     const r = prng.random();
+diff --git a/zig/src/families/deepseek_v41/sampling_gpu.zig b/zig/src/families/deepseek_v41/sampling_gpu.zig
+index adcd908..d901fca 100644
+--- a/zig/src/families/deepseek_v41/sampling_gpu.zig
++++ b/zig/src/families/deepseek_v41/sampling_gpu.zig
+@@ -11,9 +11,10 @@ pub const Sampling = pipe.Sampling;
+ pub const Seg = pipe.Pipe.Seg;
+ pub const sampled = pipe.sampled;
+ 
+-/// TF_DSV41_SAMPLING=1 (every rank alike): model.zig makes the sampler; unset, sampled requests are refused as before.
++/// TF_DSV41_SAMPLING=0 refuses T > 0 (error.Sampling). Unset is on: the server samples at
++/// temperature 1.0 when a request omits it (#1725), and an unbuilt sampler is that 500.
+ pub fn enabled() !bool {
+-    return @import("sys").environment.read(bool, "TF_DSV41_SAMPLING", false);
++    return @import("sys").environment.read(bool, "TF_DSV41_SAMPLING", true);
+ }
+ 
+ /// One rank's sampler over its forward (model.zig makes one on every rank; it hooks the follower side itself).
+diff --git a/zig/src/families/deepseek_v41/serve_engine.zig b/zig/src/families/deepseek_v41/serve_engine.zig
+index 0ec70ee..16adc75 100644
+--- a/zig/src/families/deepseek_v41/serve_engine.zig
++++ b/zig/src/families/deepseek_v41/serve_engine.zig
+@@ -46,6 +46,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
+         problem.* = model.asset_names.unset;
+         return null;
+     });
++    // cuda_model reads TF_TP_RANK / WORLD / MASTER / PORT. --rank and --master do not reach it otherwise.
++    @import("tp_publish.zig").publish(.{ .tp = o.tp, .rank = o.rank, .master = o.master, .master_port = o.master_port });
+     const s = Served.open(gpa, io, o.dir, assets, o.drafts, o.context, o.prompt_cache_gib) catch |e| {
+         problem.* = try std.fmt.allocPrint(a, "the DeepSeek-V4.1 CUDA engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
+         return null;
+diff --git a/zig/src/families/deepseek_v41/tp_publish.zig b/zig/src/families/deepseek_v41/tp_publish.zig
+new file mode 100644
+index 0000000..32aec75
+--- /dev/null
++++ b/zig/src/families/deepseek_v41/tp_publish.zig
+@@ -0,0 +1,57 @@
++//! Copy the server's `--tp` / `--rank` / `--master` onto the names `tp.Config.fromEnv` reads.
++//! An explicit TF_TP_* value already in the environment is left as it is.
++
++const std = @import("std");
++
++extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
++extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
++extern "c" fn unsetenv(name: [*:0]const u8) c_int;
++
++pub const Place = struct {
++    tp: u32,
++    rank: u32,
++    master: []const u8,
++    master_port: u16,
++};
++
++fn put(name: [*:0]const u8, text: [:0]const u8) void {
++    if (getenv(name) != null) return;
++    _ = setenv(name, text.ptr, 0);
++}
++
++fn putInt(comptime name: [*:0]const u8, n: u32) void {
++    var buf: [16]u8 = undefined;
++    const text = std.fmt.bufPrintSentinel(&buf, "{d}", .{n}, 0) catch return;
++    put(name, text);
++}
++
++/// World 1 does not publish: the session's own default stays. A set TF_TP_* name is not replaced.
++pub fn publish(p: Place) void {
++    if (p.tp < 2) return;
++    putInt("TF_TP_WORLD", p.tp);
++    putInt("TF_TP_RANK", p.rank);
++    putInt("TF_TP_PORT", p.master_port);
++    if (p.master.len == 0 or p.master.len >= 256) return;
++    var buf: [256]u8 = undefined;
++    @memcpy(buf[0..p.master.len], p.master);
++    buf[p.master.len] = 0;
++    put("TF_TP_MASTER", buf[0..p.master.len :0]);
++}
++
++test "publish copies --tp onto TF_TP_* and does not replace a name already set" {
++    const names = [_][:0]const u8{ "TF_TP_WORLD", "TF_TP_RANK", "TF_TP_PORT", "TF_TP_MASTER" };
++    for (names) |n| _ = unsetenv(n.ptr);
++    defer {
++        for (names) |n| _ = unsetenv(n.ptr);
++    }
++    publish(.{ .tp = 1, .rank = 0, .master = "10.0.0.1", .master_port = 29551 });
++    try std.testing.expect(getenv("TF_TP_WORLD") == null);
++    publish(.{ .tp = 2, .rank = 1, .master = "100.78.243.41", .master_port = 29551 });
++    try std.testing.expectEqualStrings("2", std.mem.span(getenv("TF_TP_WORLD").?));
++    try std.testing.expectEqualStrings("1", std.mem.span(getenv("TF_TP_RANK").?));
++    try std.testing.expectEqualStrings("29551", std.mem.span(getenv("TF_TP_PORT").?));
++    try std.testing.expectEqualStrings("100.78.243.41", std.mem.span(getenv("TF_TP_MASTER").?));
++    publish(.{ .tp = 2, .rank = 0, .master = "other", .master_port = 1 });
++    try std.testing.expectEqualStrings("1", std.mem.span(getenv("TF_TP_RANK").?));
++    try std.testing.expectEqualStrings("100.78.243.41", std.mem.span(getenv("TF_TP_MASTER").?));
++}

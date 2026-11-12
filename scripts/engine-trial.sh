@@ -46,6 +46,18 @@ export PARALLEL="${PARALLEL:-4}"
 HOST="$(trial_pick_host)"
 export HOST
 export TF_DSV41_CONTEXT="${TF_DSV41_CONTEXT:-$CONTEXT}"
+# Boot floor: the engine's unset dip is 3.0 GiB and missed by about 0.03 GiB on these Sparks.
+export TF_DSV41_SERVE_DIP_GIB="${TF_DSV41_SERVE_DIP_GIB:-2.5}"
+# Omitting temperature samples at 1.0. The sampler has to exist or that request is HTTP 500 Sampling.
+export TF_DSV41_SAMPLING="${TF_DSV41_SAMPLING:-1}"
+# Small TP exchanges over RoCE. NCCL still carries the large ones. Set TF_COMM_BACKEND=nccl to compare.
+export TF_COMM_BACKEND="${TF_COMM_BACKEND:-roce}"
+export TF_TP_KERNEL_IMAGE="${TF_TP_KERNEL_IMAGE:-/opt/tensorfold/tp_mailbox.fatbin}"
+export TF_TP_WORLD="${TF_TP_WORLD:-2}"
+ENGRAM_CACHE="${ENGRAM_CACHE:-$HOME/.cache/dsv41-tensorfold/engram-1bae0e10}"
+if [[ -z "${TF_DSV41_ENGRAM_DIR:-}" && -d "$ENGRAM_CACHE" ]]; then
+  export TF_DSV41_ENGRAM_DIR="$ENGRAM_CACHE"
+fi
 
 if [[ "$CONTEXT" -gt "$MAX_CONTEXT" || "$TF_DSV41_CONTEXT" -gt "$MAX_CONTEXT" ]]; then
   echo "engine-trial: CONTEXT=$CONTEXT is above $MAX_CONTEXT" >&2
@@ -85,6 +97,7 @@ trial_assert_identity
 if [[ "$GUARD_ONLY" == 1 || "${DRY_RUN:-0}" == 1 ]]; then
   echo "engine-trial: container=$CONTAINER_NAME image=$IMAGE port=$PORT host=$HOST"
   echo "engine-trial: TF_DSV41_PREFILL=${TF_DSV41_PREFILL:-full} TF_DSV41_SLOTS=${TF_DSV41_SLOTS:-unset} TF_DSV41_SESSION_RESIDENT_GIB=${TF_DSV41_SESSION_RESIDENT_GIB:-unset} TF_DSV41_CONTEXT=$TF_DSV41_CONTEXT"
+  echo "engine-trial: TF_COMM_BACKEND=$TF_COMM_BACKEND TF_TP_KERNEL_IMAGE=$TF_TP_KERNEL_IMAGE TF_DSV41_SERVE_DIP_GIB=$TF_DSV41_SERVE_DIP_GIB TF_DSV41_SAMPLING=$TF_DSV41_SAMPLING"
   echo "engine-trial: live image $LIVE_IMAGE and container $LIVE_CONTAINER are not targets"
   echo "trial-guard: ok"
   exit 0
@@ -116,6 +129,9 @@ ip="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
 if [[ "${RANK_OVERRIDE:-}" == 1 || "$ip" == "$SPARK_TWO_TS" ]]; then
   RANK=1
 fi
+# cuda_model reads these. --rank and --master on the CLI do not set them.
+export TF_TP_RANK="$RANK"
+export TF_TP_MASTER="${TF_TP_MASTER:-$SPARK_ONE_TS}"
 
 args=(
   serve "${MODEL:?set MODEL to the EAQ v1 directory @ 45ee5d0f}"
@@ -149,7 +165,7 @@ docker rm -f "$TRIAL_CONTAINER" >/dev/null 2>&1 || true
 env_file="$(mktemp)"
 trap 'rm -f "$env_file"' EXIT
 # Forward the v1.2.7 knobs. The recipe start.sh does not know these names.
-env | awk -F= '/^(TF_DSV41_|TENSORFOLD_)/ {print}' >"$env_file"
+env | awk -F= '$1 ~ /^(TF_DSV41_|TENSORFOLD_|TF_TP_|NCCL_)/ || $1 == "TF_COMM_BACKEND" {print}' >"$env_file"
 
 run=(docker run -d
   --name "$TRIAL_CONTAINER"
@@ -162,6 +178,9 @@ if [[ -n "${TF_DSV41_ASSETS:-}" ]]; then
 fi
 if [[ -n "${TF_DSV41_SESSION_DISK:-}" ]]; then
   run+=(-v "${TF_DSV41_SESSION_DISK}:${TF_DSV41_SESSION_DISK}")
+fi
+if [[ -n "${TF_DSV41_ENGRAM_DIR:-}" ]]; then
+  run+=(-v "${TF_DSV41_ENGRAM_DIR}:${TF_DSV41_ENGRAM_DIR}:ro")
 fi
 run+=("$IMAGE" "${args[@]}")
 "${run[@]}"
